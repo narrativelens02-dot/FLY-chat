@@ -452,9 +452,24 @@
 
 <!-- Runtime config (ganti API URL untuk Vercel deployment) -->
 <script src="config.js"></script>
-<!-- Socket.io client (otomatis disajikan oleh server) -->
-<script src="/socket.io/socket.io.js"></script>
-<!-- FLYchat App — no Firebase -->
+<!-- Socket.io client: dari server lokal, fallback ke CDN untuk Vercel -->
+<script>
+(function() {
+  var api = window.__FLYCHAT_API__ || '';
+  var script = document.createElement('script');
+  // Jika ada Railway URL, load socket.io dari Railway
+  // Jika same-origin (localhost), load dari server lokal
+  script.src = api ? (api + '/socket.io/socket.io.js') : '/socket.io/socket.io.js';
+  script.onerror = function() {
+    // Fallback ke CDN jika server tidak tersedia
+    var fallback = document.createElement('script');
+    fallback.src = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
+    document.head.appendChild(fallback);
+  };
+  document.head.appendChild(script);
+})();
+</script>
+<!-- FLYchat App -->
 <script src="js/app.js"></script>
 </body>
 </html>
