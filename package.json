@@ -5,9 +5,12 @@
   "main": "server/index.js",
   "type": "commonjs",
   "scripts": {
-    "dev":   "node server/index.js",
-    "start": "node server/index.js",
-    "build": "echo Build OK — static frontend served by Express"
+    "dev":            "node server/index.js",
+    "start":          "node server/index.js",
+    "build":          "echo Build OK",
+    "deploy":         "node deploy.js",
+    "deploy:vercel":  "node node_modules/vercel/dist/index.js --prod",
+    "deploy:railway": "node node_modules/@railway/cli/bin/run.js up"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.9.4",
@@ -19,5 +22,9 @@
     "multer":                   "^1.4.5-lts.1",
     "socket.io":                "^4.7.5",
     "uuid":                     "^9.0.1"
+  },
+  "devDependencies": {
+    "@railway/cli": "^5.71.0",
+    "vercel":       "^39.3.0"
   }
 }
