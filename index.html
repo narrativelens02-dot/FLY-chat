@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="id" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>FLYchat</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#7d2535" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="FLYchat" />
+  <link rel="apple-touch-icon" href="assets/icon.svg" />
+
+  <!-- SEO -->
+  <meta name="description" content="FLYchat — Aplikasi chat real-time dengan fitur lengkap" />
+
+  <!-- Styles -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<!-- ===================== SPLASH SCREEN ===================== -->
+<div id="splash-screen" class="screen active">
+  <div class="splash-content">
+    <div class="logo-icon">
+      <svg viewBox="0 0 120 96" xmlns="http://www.w3.org/2000/svg">
+        <path d="M60 12 C36 12, 6 30, 6 54 C6 66, 18 78, 36 72 C42 70, 48 62, 60 54 C72 62, 78 70, 84 72 C102 78, 114 66, 114 54 C114 30, 84 12, 60 12Z" fill="white"/>
+        <path d="M60 54 C54 42, 42 33, 30 30 C42 26, 58 34, 60 12 C62 34, 78 26, 90 30 C78 33, 66 42, 60 54Z" fill="rgba(255,255,255,0.35)"/>
+      </svg>
+    </div>
+    <h1 class="app-name">FLYchat</h1>
+    <p class="splash-tagline">Terhubung, kapan saja</p>
+    <div class="splash-loader">
+      <div class="loader-dot"></div><div class="loader-dot"></div><div class="loader-dot"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== LOGIN SCREEN ===================== -->
+<div id="login-screen" class="screen">
+  <div class="auth-bg">
+    <div class="auth-container">
+      <div class="auth-logo">
+        <svg viewBox="0 0 120 96" xmlns="http://www.w3.org/2000/svg">
+          <path d="M60 12 C36 12, 6 30, 6 54 C6 66, 18 78, 36 72 C42 70, 48 62, 60 54 C72 62, 78 70, 84 72 C102 78, 114 66, 114 54 C114 30, 84 12, 60 12Z" fill="#7d2535"/>
+          <path d="M60 54 C54 42, 42 33, 30 30 C42 26, 58 34, 60 12 C62 34, 78 26, 90 30 C78 33, 66 42, 60 54Z" fill="rgba(125,37,53,0.35)"/>
+        </svg>
+        <span class="auth-logo-name">FLYchat</span>
+      </div>
+      <h2>Masuk ke Akun</h2>
+      <p class="auth-subtitle">Selamat datang kembali! 👋</p>
+      <div id="login-error" class="error-msg hidden"></div>
+      <form id="login-form" autocomplete="on">
+        <div class="input-group">
+          <span class="input-icon">✉️</span>
+          <input type="email" id="login-email" placeholder="Email" required autocomplete="email" />
+        </div>
+        <div class="input-group">
+          <span class="input-icon">🔒</span>
+          <input type="password" id="login-password" placeholder="Password" required autocomplete="current-password" />
+          <button type="button" class="toggle-pw" onclick="togglePassword('login-password',this)" aria-label="Lihat password">👁</button>
+        </div>
+        <div class="forgot-pw">
+          <a href="#" onclick="forgotPassword()">Lupa password?</a>
+        </div>
+        <button type="submit" class="btn-primary" id="login-btn">
+          <span class="btn-text">Masuk</span>
+          <span class="spinner hidden"></span>
+        </button>
+      </form>
+      <div class="divider"><span>atau masuk dengan</span></div>
+      <div class="social-btns">
+        <button class="social-btn google-btn" onclick="signInWithGoogle()" aria-label="Masuk dengan Google">
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" width="22" height="22"/>
+          <span>Google</span>
+        </button>
+      </div>
+      <p class="switch-auth">Belum punya akun? <a href="#" onclick="showScreen('register-screen')">Daftar sekarang</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== REGISTER SCREEN ===================== -->
+<div id="register-screen" class="screen">
+  <div class="auth-bg">
+    <div class="auth-container">
+      <button class="back-btn" onclick="showScreen('login-screen')" aria-label="Kembali">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="20" height="20"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+      </button>
+      <div class="auth-logo">
+        <svg viewBox="0 0 120 96" xmlns="http://www.w3.org/2000/svg">
+          <path d="M60 12 C36 12, 6 30, 6 54 C6 66, 18 78, 36 72 C42 70, 48 62, 60 54 C72 62, 78 70, 84 72 C102 78, 114 66, 114 54 C114 30, 84 12, 60 12Z" fill="#7d2535"/>
+          <path d="M60 54 C54 42, 42 33, 30 30 C42 26, 58 34, 60 12 C62 34, 78 26, 90 30 C78 33, 66 42, 60 54Z" fill="rgba(125,37,53,0.35)"/>
+        </svg>
+        <span class="auth-logo-name">FLYchat</span>
+      </div>
+      <h2>Buat Akun Baru</h2>
+      <p class="auth-subtitle">Bergabung dan mulai mengobrol!</p>
+      <div id="register-error" class="error-msg hidden"></div>
+      <form id="register-form" autocomplete="on">
+        <div class="input-group">
+          <span class="input-icon">👤</span>
+          <input type="text" id="reg-name" placeholder="Nama Tampilan" required minlength="2" />
+        </div>
+        <div class="input-group">
+          <span class="input-icon">✉️</span>
+          <input type="email" id="reg-email" placeholder="Email" required autocomplete="email" />
+        </div>
+        <div class="input-group">
+          <span class="input-icon">🔒</span>
+          <input type="password" id="reg-password" placeholder="Password (min. 6 karakter)" required autocomplete="new-password" minlength="6" />
+          <button type="button" class="toggle-pw" onclick="togglePassword('reg-password',this)" aria-label="Lihat password">👁</button>
+        </div>
+        <div class="input-group">
+          <span class="input-icon">🔒</span>
+          <input type="password" id="reg-confirm" placeholder="Konfirmasi Password" required autocomplete="new-password" />
+          <button type="button" class="toggle-pw" onclick="togglePassword('reg-confirm',this)" aria-label="Lihat password">👁</button>
+        </div>
+        <button type="submit" class="btn-primary" id="register-btn">
+          <span class="btn-text">Daftar</span>
+          <span class="spinner hidden"></span>
+        </button>
+      </form>
+      <div class="divider"><span>atau daftar dengan</span></div>
+      <div class="social-btns">
+        <button class="social-btn google-btn" onclick="signInWithGoogle()" aria-label="Daftar dengan Google">
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" width="22" height="22"/>
+          <span>Google</span>
+        </button>
+      </div>
+      <p class="switch-auth">Sudah punya akun? <a href="#" onclick="showScreen('login-screen')">Masuk</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== HOME SCREEN ===================== -->
+<div id="home-screen" class="screen">
+  <div class="home-layout">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="user-info-mini" onclick="showScreen('profile-screen')" role="button" tabindex="0" aria-label="Profil saya">
+          <div class="avatar-container">
+            <img id="sidebar-avatar" src="assets/default-avatar.svg" alt="avatar saya" class="avatar-sm" />
+            <span class="online-dot" id="my-online-dot"></span>
+          </div>
+          <div>
+            <div id="sidebar-name" class="sidebar-username">User</div>
+            <div id="sidebar-status" class="sidebar-userstatus">Hei, aku pakai FLYchat!</div>
+          </div>
+        </div>
+        <div class="sidebar-actions">
+          <button class="icon-btn" title="Tambah kontak" onclick="showAddContact()" aria-label="Tambah kontak">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </button>
+          <button class="icon-btn" title="Tema gelap/terang" onclick="toggleTheme()" aria-label="Toggle tema" id="theme-btn">🌙</button>
+          <button class="icon-btn" title="Pengaturan" onclick="showScreen('profile-screen')" aria-label="Pengaturan">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="search" id="search-contacts" placeholder="Cari percakapan..." oninput="filterContacts(this.value)" aria-label="Cari percakapan" />
+      </div>
+
+      <div class="chat-tabs" role="tablist">
+        <button class="tab-btn active" role="tab" onclick="switchTab('chats',this)" aria-selected="true">
+          💬 Pesan
+        </button>
+        <button class="tab-btn" role="tab" onclick="switchTab('contacts',this)" aria-selected="false">
+          👥 Kontak
+        </button>
+      </div>
+
+      <div id="chat-list" class="chat-list" role="list"></div>
+      <div id="contacts-list" class="chat-list hidden" role="list"></div>
+
+      <div class="sidebar-footer">
+        🦋 FLYchat &nbsp;·&nbsp; <span id="app-version">v2.0</span>
+      </div>
+    </aside>
+
+    <!-- CHAT AREA -->
+    <main class="chat-area" id="chat-area">
+      <!-- Empty state -->
+      <div class="empty-chat" id="empty-chat">
+        <div class="empty-anim">
+          <svg viewBox="0 0 120 96" xmlns="http://www.w3.org/2000/svg" width="80" height="64">
+            <path d="M60 12 C36 12, 6 30, 6 54 C6 66, 18 78, 36 72 C42 70, 48 62, 60 54 C72 62, 78 70, 84 72 C102 78, 114 66, 114 54 C114 30, 84 12, 60 12Z" fill="var(--primary)" opacity="0.2"/>
+          </svg>
+        </div>
+        <h3>Selamat datang di FLYchat 🦋</h3>
+        <p>Pilih percakapan atau tambah kontak baru untuk mulai mengobrol</p>
+        <button class="btn-primary" style="width:auto;padding:10px 24px;margin-top:8px" onclick="showAddContact()">
+          + Mulai percakapan
+        </button>
+      </div>
+
+      <!-- Active chat panel -->
+      <div id="active-chat" class="hidden">
+        <!-- Chat Header -->
+        <div class="chat-header">
+          <button class="back-chat-btn" onclick="closeChatMobile()" aria-label="Kembali">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="22" height="22"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+          </button>
+          <div class="chat-header-avatar" onclick="showPartnerProfile()" style="cursor:pointer">
+            <img id="chat-partner-avatar" src="assets/default-avatar.svg" alt="" class="avatar-sm" />
+            <span class="online-dot" id="partner-online-dot"></span>
+          </div>
+          <div class="chat-partner-info" onclick="showPartnerProfile()" style="cursor:pointer;flex:1">
+            <span id="chat-partner-name" class="partner-name">-</span>
+            <span id="chat-partner-status" class="status-text">offline</span>
+          </div>
+          <div class="chat-header-actions">
+            <button class="icon-btn" onclick="startVoiceCall()" title="Panggilan Suara" aria-label="Panggilan suara">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44a2 2 0 0 1 1.99-2.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.09a16 16 0 0 0 6 6l.94-.94a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7a2 2 0 0 1 1.72 2.01z"/></svg>
+            </button>
+            <button class="icon-btn" onclick="startVideoCall()" title="Video Call" aria-label="Video call">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </button>
+            <button class="icon-btn" onclick="toggleChatMenu()" title="Lebih banyak" aria-label="Menu chat" id="chat-menu-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg>
+            </button>
+            <!-- Chat dropdown menu -->
+            <div id="chat-dropdown" class="dropdown-menu hidden">
+              <button onclick="clearChatHistory()" class="dropdown-item">🗑 Hapus riwayat</button>
+              <button onclick="showPartnerProfile()" class="dropdown-item">👤 Lihat profil</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Messages -->
+        <div class="messages-container" id="messages-container" onclick="closeAllMenus()">
+          <div id="messages-list"></div>
+          <div id="typing-area"></div>
+        </div>
+
+        <!-- Reply Preview -->
+        <div id="reply-preview" class="reply-preview hidden">
+          <div class="reply-preview-content">
+            <span class="reply-preview-name" id="reply-preview-name"></span>
+            <span class="reply-preview-text" id="reply-preview-text"></span>
+          </div>
+          <button onclick="cancelReply()" class="reply-close" aria-label="Batalkan balas">✕</button>
+        </div>
+
+        <!-- Message Input -->
+        <div class="message-input-area">
+          <!-- Attachment preview row -->
+          <div class="attachment-preview" id="attachment-preview"></div>
+
+          <div class="input-row">
+            <!-- Attach button -->
+            <div class="attach-wrapper">
+              <button class="icon-btn attach-btn" onclick="toggleAttachMenu()" title="Lampiran" aria-label="Lampiran" aria-expanded="false" id="attach-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+              </button>
+              <div class="attach-menu hidden" id="attach-menu" role="menu">
+                <button onclick="triggerFileInput('image')" class="attach-option" role="menuitem">
+                  <span class="attach-opt-icon" style="background:#ffe4e6">🖼️</span>
+                  <span>Foto</span>
+                </button>
+                <button onclick="triggerFileInput('video')" class="attach-option" role="menuitem">
+                  <span class="attach-opt-icon" style="background:#ede9fe">🎥</span>
+                  <span>Video</span>
+                </button>
+                <button onclick="triggerFileInput('document')" class="attach-option" role="menuitem">
+                  <span class="attach-opt-icon" style="background:#dbeafe">📄</span>
+                  <span>Dokumen</span>
+                </button>
+                <button onclick="shareLocation()" class="attach-option" role="menuitem">
+                  <span class="attach-opt-icon" style="background:#dcfce7">📍</span>
+                  <span>Lokasi</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Text input -->
+            <input type="text" id="message-input" placeholder="Tulis pesan..."
+              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"
+              oninput="handleTyping()"
+              aria-label="Tulis pesan" />
+
+            <!-- Emoji -->
+            <button class="icon-btn emoji-toggle-btn" onclick="toggleEmojiPicker()" title="Emoji" aria-label="Emoji" aria-expanded="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22"><circle cx="12" cy="12" r="10"/><path d="M8 13s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+            </button>
+
+            <!-- Send -->
+            <button class="send-btn" id="send-btn" onclick="sendMessage()" aria-label="Kirim pesan">
+              <svg viewBox="0 0 24 24" fill="currentColor" width="20" height="20"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+            </button>
+          </div>
+
+          <!-- Emoji Picker -->
+          <div id="emoji-picker" class="emoji-picker hidden" role="dialog" aria-label="Pilih emoji"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Hidden file inputs -->
+  <input type="file" id="file-image"    accept="image/*"    class="hidden" onchange="handleFileSelect(this,'image')" />
+  <input type="file" id="file-video"    accept="video/*"    class="hidden" onchange="handleFileSelect(this,'video')" />
+  <input type="file" id="file-document" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar,.csv" class="hidden" onchange="handleFileSelect(this,'document')" />
+
+  <!-- Add Contact Modal -->
+  <div id="add-contact-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="add-contact-title">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="add-contact-title">Tambah Kontak</h3>
+        <button onclick="closeModal('add-contact-modal')" aria-label="Tutup">✕</button>
+      </div>
+      <div class="search-user-box">
+        <input type="email" id="search-user-input" placeholder="Masukkan email pengguna..."
+          onkeydown="if(event.key==='Enter')searchUser()" aria-label="Email pengguna" />
+        <button class="btn-primary small" onclick="searchUser()">🔍 Cari</button>
+      </div>
+      <div id="search-result" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <!-- Partner Profile Modal -->
+  <div id="partner-profile-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Info Kontak</h3>
+        <button onclick="closeModal('partner-profile-modal')" aria-label="Tutup">✕</button>
+      </div>
+      <div id="partner-profile-content" style="text-align:center;padding:16px 0"></div>
+    </div>
+  </div>
+
+  <!-- Message Context Menu -->
+  <div id="msg-context-menu" class="context-menu hidden" role="menu">
+    <button class="context-item" id="ctx-reply" onclick="replyToMsg()" role="menuitem">↩ Balas</button>
+    <button class="context-item" id="ctx-copy"  onclick="copyMsg()"    role="menuitem">📋 Salin</button>
+    <button class="context-item" id="ctx-delete" onclick="deleteMsg()" role="menuitem" style="color:#dc2626">🗑 Hapus</button>
+  </div>
+</div>
+
+<!-- ===================== PROFILE SCREEN ===================== -->
+<div id="profile-screen" class="screen">
+  <div class="profile-layout">
+    <div class="profile-header">
+      <button class="back-btn-white" onclick="showScreen('home-screen')" aria-label="Kembali">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" width="22" height="22"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+      </button>
+      <h2>Pengaturan Profil</h2>
+    </div>
+
+    <div class="profile-body">
+      <!-- Avatar -->
+      <div class="profile-avatar-section">
+        <div class="avatar-wrapper" onclick="triggerAvatarUpload()" role="button" tabindex="0" aria-label="Ganti foto profil">
+          <img id="profile-avatar-img" src="assets/default-avatar.svg" alt="Foto profil" class="avatar-lg" />
+          <div class="avatar-overlay">
+            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" width="28" height="28"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <span style="font-size:0.75rem;margin-top:4px">Ganti foto</span>
+          </div>
+        </div>
+        <input type="file" id="avatar-upload" accept="image/*" class="hidden" onchange="uploadAvatar(this)" />
+        <div id="profile-upload-progress" class="hidden" style="width:100px;margin-top:8px">
+          <div class="upload-progress"><div class="upload-progress-bar" id="avatar-progress-bar" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <!-- Form -->
+      <div class="profile-form">
+        <div class="form-section-title">Informasi Pribadi</div>
+
+        <div class="form-group">
+          <label for="profile-name">Nama Tampilan</label>
+          <input type="text" id="profile-name" placeholder="Nama kamu" maxlength="50" />
+        </div>
+        <div class="form-group">
+          <label for="profile-status">Status</label>
+          <input type="text" id="profile-status" placeholder="Hei, aku pakai FLYchat!" maxlength="100"
+            oninput="document.getElementById('status-count').textContent=this.value.length+'/100'" />
+          <span class="char-count" id="status-count">0/100</span>
+        </div>
+        <div class="form-group">
+          <label for="profile-about">Tentang</label>
+          <textarea id="profile-about" placeholder="Ceritakan sedikit tentang dirimu..." rows="3" maxlength="200"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="profile-phone">Nomor HP (opsional)</label>
+          <input type="tel" id="profile-phone" placeholder="+62 ..." />
+        </div>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="profile-email" readonly class="readonly-input" tabindex="-1" />
+        </div>
+
+        <div class="form-section-title" style="margin-top:8px">Privasi</div>
+        <div class="form-group toggle-group">
+          <div>
+            <div style="font-weight:600;font-size:0.9rem">Tampilkan status online</div>
+            <div style="font-size:0.8rem;color:var(--text-light)">Izinkan orang lain melihat ketika kamu online</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-online-status" checked onchange="saveOnlinePreference(this.checked)" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="form-group toggle-group">
+          <div>
+            <div style="font-weight:600;font-size:0.9rem">Notifikasi browser</div>
+            <div style="font-size:0.8rem;color:var(--text-light)">Terima notifikasi untuk pesan baru</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-notif" onchange="toggleNotifications(this.checked)" />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <button class="btn-primary" onclick="saveProfile()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right:6px"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          Simpan Perubahan
+        </button>
+        <button class="btn-danger" onclick="confirmLogout()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="margin-right:6px"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          Keluar dari Akun
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== GLOBAL UI ===================== -->
+<!-- Toast -->
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<!-- Lightbox -->
+<div id="lightbox" class="lightbox hidden" onclick="closeLightbox()" role="dialog" aria-modal="true" aria-label="Preview gambar">
+  <div class="lightbox-inner" onclick="event.stopPropagation()">
+    <img id="lightbox-img" src="" alt="preview gambar" />
+    <div class="lightbox-toolbar">
+      <a id="lightbox-download" href="" download target="_blank" class="lb-btn" aria-label="Unduh">⬇ Unduh</a>
+      <button onclick="closeLightbox()" class="lb-btn" aria-label="Tutup">✕ Tutup</button>
+    </div>
+  </div>
+</div>
+
+<!-- Firebase -->
+<script type="module" src="js/firebase-config.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

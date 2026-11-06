@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Environment — JANGAN commit ke git!
+.env
+.env.local
+.env.production
+
+# Upload files
+uploads/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+*.swp
