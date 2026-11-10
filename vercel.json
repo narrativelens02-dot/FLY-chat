@@ -2,37 +2,24 @@
   "version": 2,
   "name": "flychat",
   "outputDirectory": "public",
-  "buildCommand": "echo 'no build needed'",
-  "installCommand": "echo 'no install needed'",
-  "routes": [
-    {
-      "src": "/sw.js",
-      "headers": {
-        "Service-Worker-Allowed": "/",
-        "Cache-Control": "no-cache, no-store, must-revalidate"
-      },
-      "dest": "/sw.js"
-    },
-    {
-      "src": "/socket.io/(.*)",
-      "dest": "https://flychat-api.up.railway.app/socket.io/$1"
-    },
-    {
-      "src": "/api/(.*)",
-      "dest": "https://flychat-api.up.railway.app/api/$1"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "/$1"
-    }
+  "buildCommand": "echo ok",
+  "installCommand": "echo ok",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/$1" }
   ],
   "headers": [
+    {
+      "source": "/sw.js",
+      "headers": [
+        { "key": "Service-Worker-Allowed", "value": "/" },
+        { "key": "Cache-Control",          "value": "no-cache" }
+      ]
+    },
     {
       "source": "/(.*)",
       "headers": [
         { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options",        "value": "DENY" },
-        { "key": "Referrer-Policy",        "value": "strict-origin-when-cross-origin" }
+        { "key": "X-Frame-Options",        "value": "SAMEORIGIN" }
       ]
     }
   ]

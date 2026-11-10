@@ -2,294 +2,269 @@
  * FLYchat — Script Deploy Otomatis
  * Jalankan: node deploy.js
  *
- * Script ini akan:
- * 1. Cek semua dependency (git, vercel CLI, railway CLI)
- * 2. Push ke GitHub (buat repo baru otomatis)
- * 3. Deploy backend ke Railway
- * 4. Deploy frontend ke Vercel
- * 5. Update config.js dengan URL yang didapat
+ * Strategi:
+ *  1. Push ke GitHub
+ *  2. Deploy backend ke Render.com (gratis, always-on, via GitHub)
+ *  3. Deploy frontend ke Vercel (via GitHub)
+ *  4. Update config.js dengan URL backend
  */
-
 'use strict';
-const { execSync, spawnSync } = require('child_process');
-const fs   = require('fs');
-const path = require('path');
-const http = require('https');
-const readline = require('readline');
 
-const ROOT = __dirname;
+const { execSync }  = require('child_process');
+const fs            = require('fs');
+const path          = require('path');
+const readline      = require('readline');
+const { execFile }  = require('child_process');
 
-/* ── helpers ── */
-const log  = (msg)  => console.log(`\n  ${msg}`);
-const ok   = (msg)  => console.log(`  ✅ ${msg}`);
-const err  = (msg)  => console.log(`  ❌ ${msg}`);
-const info = (msg)  => console.log(`  ℹ️  ${msg}`);
-const hr   = ()     => console.log('\n' + '─'.repeat(50));
+const ROOT    = __dirname;
+const ENV     = readEnv();
+const VERCEL  = path.join(ROOT, 'node_modules', 'vercel', 'dist', 'index.js');
+
+/* ── utils ── */
+const log  = m => console.log(`\n  ${m}`);
+const ok   = m => console.log(`  ✅ ${m}`);
+const warn = m => console.log(`  ⚠️  ${m}`);
+const info = m => console.log(`  ℹ️  ${m}`);
+const hr   = () => console.log('\n' + '─'.repeat(52));
 
 function run(cmd, opts = {}) {
-  try {
-    const result = execSync(cmd, { cwd: ROOT, stdio: opts.silent ? 'pipe' : 'inherit', encoding: 'utf8' });
-    return result?.trim() || '';
-  } catch (e) {
-    if (opts.ignoreError) return '';
-    throw e;
-  }
+  return execSync(cmd, {
+    cwd: ROOT, encoding: 'utf8',
+    stdio: opts.silent ? 'pipe' : 'inherit'
+  })?.trim() || '';
 }
-
 function runSilent(cmd) {
-  return run(cmd, { silent: true, ignoreError: true });
+  try { return execSync(cmd, { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' })?.trim() || ''; }
+  catch { return ''; }
 }
-
-function ask(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise(resolve => rl.question(`\n  ${question}: `, ans => { rl.close(); resolve(ans.trim()); }));
-}
-
-function hasCommand(cmd) {
-  const r = spawnSync(cmd, ['--version'], { stdio: 'pipe', shell: true });
-  return r.status === 0;
-}
-
 function readEnv() {
   const env = {};
-  const lines = fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split('\n');
-  lines.forEach(l => {
-    const m = l.match(/^([^#=]+)=(.*)$/);
-    if (m) env[m[1].trim()] = m[2].trim();
-  });
+  try {
+    fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split('\n').forEach(l => {
+      const m = l.match(/^([^#=\s][^=]*)=(.*)$/);
+      if (m) env[m[1].trim()] = m[2].trim();
+    });
+  } catch {}
   return env;
+}
+function ask(q) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(r => rl.question(`\n  ${q}: `, a => { rl.close(); r(a.trim()); }));
+}
+function openBrowser(url) {
+  try { execSync(`start "" "${url}"`, { stdio: 'ignore' }); } catch {}
+}
+function writeConfig(apiUrl) {
+  const content = `/**
+ * FLYchat Runtime Config — AUTO GENERATED
+ * Backend: ${apiUrl || 'localhost (dev)'}
+ */
+window.__FLYCHAT_API__ = '${apiUrl || ''}';
+`;
+  fs.writeFileSync(path.join(ROOT, 'public', 'config.js'), content);
 }
 
 /* ════════════════════════════════════════
    MAIN
 ════════════════════════════════════════ */
 (async () => {
-  console.log('\n🦋 FLYchat — Deploy Otomatis\n' + '─'.repeat(50));
+  console.clear();
+  console.log('');
+  console.log('  🦋  FLYchat — Deploy ke Internet');
+  console.log('  ' + '─'.repeat(50));
 
-  /* ── Step 1: Cek environment ── */
-  hr();
-  log('Step 1: Cek tools yang dibutuhkan...');
-
-  const hasGit     = hasCommand('git');
-  const hasVercel  = hasCommand('vercel');
-  const hasRailway = hasCommand('railway');
-  const hasGhCli   = hasCommand('gh');
-  const hasNpx     = fs.existsSync('C:/Program Files/nodejs/node_modules/npm/bin/npx-cli.js');
-
-  ok(`Git: ${hasGit ? 'ada' : 'TIDAK ADA — install dari https://git-scm.com'}`);
-  ok(`Vercel CLI: ${hasVercel ? 'ada' : 'belum — akan diinstall otomatis'}`);
-  ok(`Railway CLI: ${hasRailway ? 'ada' : 'belum — akan diinstall otomatis'}`);
-  ok(`GitHub CLI: ${hasGhCli ? 'ada' : 'opsional — bisa skip'}`);
-
-  if (!hasGit) {
-    err('Git tidak ditemukan. Install dari: https://git-scm.com/download/win');
-    err('Setelah install, restart terminal dan jalankan lagi: node deploy.js');
+  /* ── 0. Cek git ── */
+  if (!runSilent('git --version')) {
+    warn('Git tidak ditemukan. Install dari: https://git-scm.com');
     process.exit(1);
   }
 
-  /* ── Step 2: Install CLI jika belum ada ── */
+  /* ══════════════════════════════════════
+     STEP 1 — GitHub
+  ══════════════════════════════════════ */
   hr();
-  log('Step 2: Install Vercel CLI & Railway CLI...');
+  log('STEP 1 — Push kode ke GitHub\n');
 
-  const npxCmd = hasNpx
-    ? 'node "C:/Program Files/nodejs/node_modules/npm/bin/npx-cli.js"'
-    : 'npx';
-  const npmCmd = 'node "C:/Program Files/nodejs/node_modules/npm/bin/npm-cli.js"';
+  let remote = runSilent('git remote get-url origin');
 
-  if (!hasVercel) {
-    info('Menginstall Vercel CLI...');
-    try {
-      execSync(`${npmCmd} install -g vercel`, { stdio: 'inherit', cwd: ROOT });
-      ok('Vercel CLI terinstall');
-    } catch {
-      info('Coba cara lain...');
-      execSync(`${npmCmd} install vercel --save-dev`, { stdio: 'inherit', cwd: ROOT });
-      ok('Vercel CLI terinstall (lokal)');
-    }
-  } else { ok('Vercel CLI sudah ada'); }
-
-  if (!hasRailway) {
-    info('Menginstall Railway CLI...');
-    try {
-      execSync(`${npmCmd} install -g @railway/cli`, { stdio: 'inherit', cwd: ROOT });
-      ok('Railway CLI terinstall');
-    } catch {
-      execSync(`${npmCmd} install @railway/cli --save-dev`, { stdio: 'inherit', cwd: ROOT });
-      ok('Railway CLI terinstall (lokal)');
-    }
-  } else { ok('Railway CLI sudah ada'); }
-
-  /* ── Step 3: Setup GitHub remote ── */
-  hr();
-  log('Step 3: Push kode ke GitHub...');
-
-  const currentRemote = runSilent('git remote get-url origin');
-  let githubUrl = currentRemote;
-
-  if (!currentRemote) {
+  if (!remote) {
     info('Belum ada remote GitHub.');
-    info('Silakan buka: https://github.com/new');
-    info('Buat repo baru bernama: flychat (set ke Public)');
-    info('Jangan centang "Initialize with README"');
-    githubUrl = await ask('Paste URL repo GitHub kamu (contoh: https://github.com/username/flychat)');
-
-    if (!githubUrl || !githubUrl.includes('github.com')) {
-      err('URL GitHub tidak valid. Coba lagi dengan: node deploy.js');
-      process.exit(1);
-    }
-
-    run(`git remote add origin ${githubUrl}`);
-    ok(`Remote GitHub ditambahkan: ${githubUrl}`);
+    info('Membuka GitHub untuk buat repo baru...');
+    openBrowser('https://github.com/new');
+    console.log('');
+    console.log('  Di GitHub:');
+    console.log('  • Repository name: flychat');
+    console.log('  • Visibility: Public');
+    console.log('  • JANGAN centang "Initialize with README"');
+    console.log('  • Klik Create repository');
+    console.log('');
+    remote = await ask('Paste URL repo GitHub kamu\n  (contoh: https://github.com/username/flychat.git)');
+    if (!remote.includes('github.com')) { warn('URL tidak valid'); process.exit(1); }
+    run(`git remote add origin ${remote}`);
+    ok('Remote GitHub ditambahkan');
   } else {
-    ok(`GitHub remote sudah ada: ${currentRemote}`);
+    ok(`GitHub remote: ${remote}`);
   }
 
   // Push
   info('Push kode ke GitHub...');
+  const branch = runSilent('git rev-parse --abbrev-ref HEAD') || 'master';
   try {
-    run('git push -u origin master');
-    ok('Kode berhasil di-push ke GitHub!');
+    run(`git push -u origin ${branch}`);
+    ok('Push berhasil!');
   } catch {
-    try {
-      run('git push -u origin main');
-      ok('Kode berhasil di-push ke GitHub!');
-    } catch (e2) {
-      err('Push gagal. Pastikan kamu sudah login GitHub di terminal.');
-      info('Coba: git push -u origin master');
-      info('Jika minta login, masukkan username dan Personal Access Token GitHub');
-      info('Buat token di: https://github.com/settings/tokens (centang repo)');
-      process.exit(1);
+    warn('Push gagal. Pastikan sudah login GitHub.');
+    info('Kalau minta password, gunakan Personal Access Token dari:');
+    info('https://github.com/settings/tokens/new (centang scope: repo)');
+    openBrowser('https://github.com/settings/tokens/new?scopes=repo&description=flychat-deploy');
+    const retry = await ask('Sudah buat token? Tekan Enter untuk retry push, atau ketik "skip" untuk lanjut');
+    if (retry !== 'skip') {
+      try { run(`git push -u origin ${branch}`); ok('Push berhasil!'); }
+      catch { warn('Push masih gagal — lanjut tanpa push'); }
     }
   }
 
-  /* ── Step 4: Deploy ke Railway ── */
+  /* ══════════════════════════════════════
+     STEP 2 — Deploy Backend ke Render
+  ══════════════════════════════════════ */
   hr();
-  log('Step 4: Deploy backend ke Railway...');
-  info('Membuka browser untuk login Railway...');
+  log('STEP 2 — Deploy Backend ke Render.com (gratis, always-on)\n');
 
-  const env = readEnv();
+  info('Membuka Render.com...');
+  openBrowser('https://dashboard.render.com/new/web');
 
-  // Cek apakah railway CLI tersedia
-  const railwayCli = hasRailway ? 'railway' :
-    fs.existsSync(path.join(ROOT, 'node_modules/.bin/railway')) ? './node_modules/.bin/railway' :
-    fs.existsSync(path.join(ROOT, 'node_modules/@railway/cli/bin/railway.js')) ? `node "${path.join(ROOT, 'node_modules/@railway/cli/bin/railway.js')}"` :
-    null;
+  console.log('');
+  console.log('  Di Render.com:');
+  console.log('  1. Login/daftar dengan GitHub');
+  console.log('  2. Klik "New Web Service"');
+  console.log('  3. Connect repo: flychat');
+  console.log('  4. Settings (ISI PERSIS SEPERTI INI):');
+  console.log('');
+  console.log('     Name        : flychat-api');
+  console.log('     Region      : Singapore (asia)');
+  console.log('     Branch      : ' + branch);
+  console.log('     Runtime     : Node');
+  console.log('     Build Cmd   : npm install');
+  console.log('     Start Cmd   : node server/index.js');
+  console.log('     Plan        : Free');
+  console.log('');
+  console.log('  5. Klik "Advanced" → tambah Environment Variables:');
+  console.log('');
+  console.log(`     DATABASE_URL     = ${ENV.DATABASE_URL}`);
+  console.log(`     JWT_SECRET       = ${ENV.JWT_SECRET}`);
+  console.log('     PORT             = 3000');
+  console.log('     NODE_ENV         = production');
+  console.log('     UPLOAD_DIR       = uploads');
+  console.log('     MAX_FILE_SIZE_MB = 50');
+  console.log('');
+  console.log('  6. Klik "Create Web Service"');
+  console.log('  7. Tunggu deploy (~2-3 menit) → status "Live"');
+  console.log('  8. Salin URL dari dashboard (contoh: https://flychat-api.onrender.com)');
+  console.log('');
 
-  if (!railwayCli) {
-    info('Railway CLI tidak ditemukan. Deploy Railway manual:');
-    info('1. Buka: https://railway.app/new');
-    info('2. Login → New Project → Deploy from GitHub → pilih repo flychat');
-    info('3. Tambahkan environment variables berikut di Railway Settings:');
-    console.log(`\n  DATABASE_URL  = ${env.DATABASE_URL}`);
-    console.log(`  JWT_SECRET    = ${env.JWT_SECRET}`);
-    console.log(`  PORT          = 3000`);
-    console.log(`  NODE_ENV      = production`);
-    console.log(`  UPLOAD_DIR    = uploads`);
-    console.log(`  MAX_FILE_SIZE_MB = 50`);
-    console.log('');
-  } else {
-    try {
-      execSync(`${railwayCli} login --browserless`, { stdio: 'inherit', cwd: ROOT });
-      execSync(`${railwayCli} link --environment production`, { stdio: 'inherit', cwd: ROOT });
-
-      // Set env vars
-      const railwayEnvVars = [
-        `DATABASE_URL="${env.DATABASE_URL}"`,
-        `JWT_SECRET="${env.JWT_SECRET}"`,
-        `PORT=3000`,
-        `NODE_ENV=production`,
-        `UPLOAD_DIR=uploads`,
-        `MAX_FILE_SIZE_MB=50`
-      ];
-      for (const envVar of railwayEnvVars) {
-        execSync(`${railwayCli} variables set ${envVar}`, { stdio: 'pipe', cwd: ROOT });
-      }
-      ok('Environment variables Railway diset!');
-      execSync(`${railwayCli} up --detach`, { stdio: 'inherit', cwd: ROOT });
-      ok('Deploy Railway dimulai!');
-    } catch (e) {
-      info('Railway CLI error. Deploy manual via web:');
-      info('1. https://railway.app/new → Deploy from GitHub → flychat');
-      info('2. Set environment variables di Settings tab');
-    }
-  }
-
-  const railwayUrl = await ask(
-    'Setelah Railway selesai deploy, paste URL Railway kamu\n  (contoh: https://flychat-production.up.railway.app)\n  Tekan Enter untuk skip dan set nanti'
+  const renderUrl = await ask(
+    'Paste URL Render.com kamu setelah deploy selesai\n  (contoh: https://flychat-api.onrender.com)\n  Atau ketik "skip" untuk lanjut dulu'
   );
 
-  /* ── Step 5: Update config.js dengan Railway URL ── */
-  if (railwayUrl && railwayUrl.startsWith('https://')) {
-    hr();
-    log('Step 5: Update config.js dengan Railway URL...');
+  let backendUrl = '';
+  if (renderUrl && renderUrl !== 'skip' && renderUrl.startsWith('https://')) {
+    backendUrl = renderUrl.replace(/\/$/, '');
+    ok(`Backend URL: ${backendUrl}`);
 
-    const configPath = path.join(ROOT, 'public', 'config.js');
-    fs.writeFileSync(configPath, `/**
- * FLYchat Runtime Config — PRODUCTION
- * Backend: Railway | Frontend: Vercel
- */
-window.__FLYCHAT_API__ = '${railwayUrl.replace(/\/$/, '')}';
-`);
-    ok(`config.js diupdate: ${railwayUrl}`);
+    // Update config.js
+    writeConfig(backendUrl);
+    ok('config.js diupdate dengan backend URL');
 
-    // Update CORS di .env untuk Railway
-    const envContent = fs.readFileSync(path.join(ROOT, '.env'), 'utf8');
-    if (!envContent.includes('FRONTEND_URL')) {
-      fs.appendFileSync(path.join(ROOT, '.env'), `\n# Vercel frontend URL (isi setelah deploy Vercel)\nFRONTEND_URL=https://flychat.vercel.app\n`);
+    // Commit
+    run('git add public/config.js');
+    runSilent(`git commit -m "chore: set backend URL to ${backendUrl}"`);
+    runSilent(`git push origin ${branch}`);
+    ok('config.js di-commit dan di-push');
+  } else {
+    warn('Backend URL dilewati. Kamu bisa update manual nanti di public/config.js');
+  }
+
+  /* ══════════════════════════════════════
+     STEP 3 — Deploy Frontend ke Vercel
+  ══════════════════════════════════════ */
+  hr();
+  log('STEP 3 — Deploy Frontend ke Vercel\n');
+
+  if (!fs.existsSync(VERCEL)) {
+    warn(`Vercel CLI tidak ditemukan di: ${VERCEL}`);
+    info('Membuka Vercel web...');
+    openBrowser('https://vercel.com/new');
+    console.log('');
+    console.log('  Di Vercel:');
+    console.log('  1. Login dengan GitHub');
+    console.log('  2. Import repo: flychat');
+    console.log('  3. Settings:');
+    console.log('     - Framework Preset : Other');
+    console.log('     - Root Directory   : . (default)');
+    console.log('     - Output Directory : public');
+    console.log('     - Build Command    : (kosongkan)');
+    console.log('     - Install Command  : (kosongkan)');
+    console.log('  4. Klik Deploy');
+  } else {
+    info('Deploy ke Vercel via CLI...');
+    try {
+      run(`node "${VERCEL}" login`);
+      run(`node "${VERCEL}" --prod --yes`);
+      ok('Deploy Vercel berhasil!');
+    } catch (e) {
+      warn('Vercel CLI gagal: ' + e.message);
+      info('Membuka Vercel web sebagai alternatif...');
+      openBrowser('https://vercel.com/new');
     }
-
-    // Commit perubahan
-    run('git add public/config.js .env');
-    run('git commit -m "chore: set Railway API URL for production"', { ignoreError: true });
-    run('git push', { ignoreError: true });
-    ok('config.js sudah di-commit dan di-push!');
   }
 
-  /* ── Step 6: Deploy ke Vercel ── */
+  const vercelUrl = await ask(
+    'Paste URL Vercel kamu setelah deploy\n  (contoh: https://flychat.vercel.app)\n  Atau Enter untuk skip'
+  );
+
+  /* ══════════════════════════════════════
+     STEP 4 — Sambungkan Vercel ↔ Render
+  ══════════════════════════════════════ */
+  if (vercelUrl && vercelUrl.startsWith('https://') && backendUrl) {
+    hr();
+    log('STEP 4 — Sambungkan Vercel dengan Render\n');
+
+    info('Tambahkan FRONTEND_URL di Render:');
+    openBrowser('https://dashboard.render.com');
+    console.log('');
+    console.log('  Di Render dashboard:');
+    console.log('  1. Pilih service: flychat-api');
+    console.log('  2. Tab: Environment');
+    console.log('  3. Add Variable:');
+    console.log(`     FRONTEND_URL = ${vercelUrl}`);
+    console.log('  4. Save Changes → Render otomatis redeploy');
+    console.log('');
+    await ask('Tekan Enter setelah menambahkan FRONTEND_URL di Render');
+    ok('CORS dikonfigurasi untuk Vercel domain');
+  }
+
+  /* ══════════════════════════════════════
+     RINGKASAN
+  ══════════════════════════════════════ */
   hr();
-  log('Step 6: Deploy frontend ke Vercel...');
+  console.log('\n  🦋 Deploy Selesai!\n');
 
-  const vercelCli = hasVercel ? 'vercel' :
-    fs.existsSync(path.join(ROOT, 'node_modules/.bin/vercel')) ? './node_modules/.bin/vercel' :
-    fs.existsSync(path.join(ROOT, 'node_modules/vercel/src/index.js')) ? `node "${path.join(ROOT, 'node_modules/vercel/src/index.js')}"` :
-    `${npxCmd} vercel`;
-
-  info('Login ke Vercel (akan buka browser atau kirim email)...');
-  try {
-    execSync(`${vercelCli} login`, { stdio: 'inherit', cwd: ROOT });
-    ok('Login Vercel berhasil!');
-
-    // Deploy dengan settings yang benar
-    info('Deploy ke Vercel...');
-    execSync(`${vercelCli} deploy --prod --yes`, { stdio: 'inherit', cwd: ROOT });
-    ok('Deploy Vercel selesai!');
-  } catch (e) {
-    info('Vercel CLI error. Coba deploy manual:');
-    info('1. Buka: https://vercel.com/new');
-    info('2. Import repo GitHub → flychat');
-    info('3. Settings:');
-    info('   - Framework: Other');
-    info('   - Output Directory: public');
-    info('   - Build Command: (kosongkan)');
-    info('4. Klik Deploy');
+  if (backendUrl) console.log(`  🔗 Backend (Render): ${backendUrl}`);
+  if (vercelUrl)  console.log(`  🌐 Frontend (Vercel): ${vercelUrl}`);
+  if (!backendUrl && !vercelUrl) {
+    console.log('  Belum ada URL yang diset.');
+    console.log('  Jalankan lagi: node deploy.js');
   }
 
-  /* ── Summary ── */
-  hr();
-  console.log('\n🦋 Deploy Selesai!\n');
-  console.log('  Langkah selanjutnya:');
-  console.log('  1. Buka Vercel → dapat URL production (contoh: https://flychat.vercel.app)');
-  console.log('  2. Buka Railway → Settings → tambahkan env var:');
-  console.log('     FRONTEND_URL = https://flychat.vercel.app');
-  console.log('  3. Buka URL Vercel di browser → coba register akun baru!\n');
-
-  if (railwayUrl) {
-    console.log(`  🔗 Backend: ${railwayUrl}`);
+  console.log('');
+  if (vercelUrl) {
+    console.log(`  Buka sekarang: ${vercelUrl}`);
+  } else {
+    console.log('  Setelah deploy, buka URL Vercel kamu di browser.');
   }
-  console.log('  📖 Panduan lengkap: SETUP.md\n');
+  console.log('');
 
 })().catch(e => {
-  console.error('\n❌ Deploy error:', e.message);
-  console.log('\n  Jalankan ulang: node deploy.js');
+  console.error('\n  ❌ Error:', e.message);
   process.exit(1);
 });

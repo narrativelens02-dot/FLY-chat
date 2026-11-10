@@ -24,11 +24,22 @@ const ALLOWED_ORIGINS = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, Postman)
+    // Allow requests with no origin (mobile apps, curl, Postman, same-origin)
     if (!origin) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
+    // Allow localhost dev
+    if (origin.includes('localhost') || origin.includes('127.0.0.1'))
       return callback(null, true);
-    }
+    // Allow any Vercel app
+    if (origin.endsWith('.vercel.app')) return callback(null, true);
+    // Allow any Render app
+    if (origin.endsWith('.onrender.com')) return callback(null, true);
+    // Allow any Railway app
+    if (origin.endsWith('.railway.app') || origin.endsWith('.up.railway.app'))
+      return callback(null, true);
+    // Allow explicitly whitelisted origins
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    // Block everything else in production, allow in dev
+    if (process.env.NODE_ENV !== 'production') return callback(null, true);
     callback(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
@@ -39,14 +50,17 @@ const corsOptions = {
 const io = new Server(server, {
   cors: {
     origin: (origin, callback) => {
-      if (!origin || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app'))
+      if (!origin) return callback(null, true);
+      if (origin.includes('localhost') || origin.includes('127.0.0.1') ||
+          origin.endsWith('.vercel.app') || origin.endsWith('.onrender.com') ||
+          origin.endsWith('.railway.app') || ALLOWED_ORIGINS.includes(origin))
         return callback(null, true);
+      if (process.env.NODE_ENV !== 'production') return callback(null, true);
       callback(new Error('Socket CORS blocked'));
     },
     methods: ['GET', 'POST'],
     credentials: true
   },
-  // Vercel/Railway friendly transport
   transports: ['websocket', 'polling']
 });
 
