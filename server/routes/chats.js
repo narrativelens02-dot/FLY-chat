@@ -90,22 +90,36 @@ router.get('/:id/messages', auth, async (req, res) => {
   if (!c) return;
 
   const limit  = Math.min(parseInt(req.query.limit) || 100, 200);
-  const before = req.query.before; // ISO timestamp for pagination
+  const before = req.query.before;
+  const after  = req.query.after;  // ← untuk polling incremental
 
-  const messages = before
-    ? await sql`
-        SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
-        FROM messages m JOIN users u ON u.id = m.sender_id
-        WHERE m.chat_id = ${req.params.id} AND m.is_deleted = FALSE
-          AND m.created_at < ${before}
-        ORDER BY m.created_at ASC LIMIT ${limit}
-      `
-    : await sql`
-        SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
-        FROM messages m JOIN users u ON u.id = m.sender_id
-        WHERE m.chat_id = ${req.params.id} AND m.is_deleted = FALSE
-        ORDER BY m.created_at ASC LIMIT ${limit}
-      `;
+  let messages;
+  if (after) {
+    // Ambil hanya pesan baru setelah timestamp tertentu (untuk polling)
+    messages = await sql`
+      SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
+      FROM messages m JOIN users u ON u.id = m.sender_id
+      WHERE m.chat_id = ${req.params.id}
+        AND m.is_deleted = FALSE
+        AND m.created_at > ${after}::timestamptz
+      ORDER BY m.created_at ASC LIMIT ${limit}
+    `;
+  } else if (before) {
+    messages = await sql`
+      SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
+      FROM messages m JOIN users u ON u.id = m.sender_id
+      WHERE m.chat_id = ${req.params.id} AND m.is_deleted = FALSE
+        AND m.created_at < ${before}
+      ORDER BY m.created_at ASC LIMIT ${limit}
+    `;
+  } else {
+    messages = await sql`
+      SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
+      FROM messages m JOIN users u ON u.id = m.sender_id
+      WHERE m.chat_id = ${req.params.id} AND m.is_deleted = FALSE
+      ORDER BY m.created_at ASC LIMIT ${limit}
+    `;
+  }
 
   // Attach reactions
   const msgIds = messages.map(m => m.id);

@@ -5,6 +5,7 @@ node_modules/
 .env
 .env.local
 .env.production
+# .env.vercel boleh di-commit karena hanya berisi nama key (reference)
 
 # Upload files
 uploads/

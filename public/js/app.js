@@ -1,13 +1,11 @@
 /**
- * FLYchat — Frontend App (Neon Postgres + Socket.io)
- * Tidak menggunakan Firebase sama sekali.
+ * FLYchat — Frontend App (Neon Postgres + Vercel Serverless)
+ * Real-time via polling — works on Vercel without Socket.io
  */
 'use strict';
 
 /* ════════════════════════════════════════
    CONFIG
-   API_BASE diset ke Railway URL saat deploy ke Vercel.
-   Saat development lokal, kosong = same-origin.
 ════════════════════════════════════════ */
 const API = window.__FLYCHAT_API__ || '';
 
@@ -20,10 +18,15 @@ let currentPartner = null;
 let replyingTo     = null;
 let contextMsgId   = null;
 let contextMsgData = null;
-let socket         = null;
 let typingTimer    = null;
 let notifEnabled   = false;
-let allChats       = [];      // cached chat list
+let allChats       = [];
+
+// Polling intervals (menggantikan Socket.io)
+let pollMessages  = null;   // poll pesan baru setiap 2 detik
+let pollChats     = null;   // poll daftar chat setiap 5 detik
+let lastMsgTime   = null;   // timestamp pesan terakhir untuk incremental poll
+let isTyping      = false;
 
 /* ════════════════════════════════════════
    BOOT
@@ -91,11 +94,51 @@ function setupFormListeners() {
 }
 
 function bootApp() {
-  connectSocket();
+  startPolling();
   loadSidebarProfile();
   loadChats();
   registerServiceWorker();
   showScreen('home-screen');
+}
+
+/* ════════════════════════════════════════
+   POLLING — real-time tanpa Socket.io
+   Vercel Serverless tidak support WebSocket.
+   Polling tiap 2s untuk pesan, 5s untuk chat list.
+════════════════════════════════════════ */
+function startPolling() {
+  stopPolling();
+  pollChats = setInterval(() => loadChats(true), 5000);
+}
+function stopPolling() {
+  clearInterval(pollChats);
+  clearInterval(pollMessages);
+  pollChats = pollMessages = null;
+}
+function startMessagePolling(chatId) {
+  clearInterval(pollMessages);
+  pollMessages = setInterval(async () => {
+    if (!chatId || chatId !== currentChatId) return;
+    try {
+      const qs   = lastMsgTime ? `?after=${encodeURIComponent(lastMsgTime)}` : '';
+      const data = await apiGet(`/api/chats/${chatId}/messages${qs}`);
+      (data.messages || []).forEach(msg => {
+        if (msg.sender_id !== currentUser.id) {
+          appendMessage(msg);
+          sendPushNotif(msg.content || `[${msg.type}]`);
+          incrementUnread(chatId);
+        }
+        if (!lastMsgTime || new Date(msg.created_at) > new Date(lastMsgTime))
+          lastMsgTime = msg.created_at;
+      });
+    } catch {}
+  }, 2000);
+}
+function stopMessagePolling() { clearInterval(pollMessages); pollMessages = null; }
+
+function updateTypingFromPoll(typing) {
+  // typing indicator dari polling tidak diimplementasi untuk Vercel
+  // karena tidak ada shared state — abaikan saja
 }
 
 /* ════════════════════════════════════════
@@ -159,7 +202,7 @@ async function handleGoogleCredential(response) {
 window.confirmLogout = function() {
   if (!confirm('Yakin ingin keluar dari FLYchat?')) return;
   apiPost('/api/auth/logout').catch(() => {});
-  socket?.disconnect();
+  stopPolling();
   localStorage.removeItem('fc_token');
   currentUser = currentChatId = currentPartner = null;
   showScreen('login-screen');
@@ -178,71 +221,6 @@ window.forgotPassword = async function() {
     showToast('Gagal: ' + err.message, 'error');
   }
 };
-
-/* ════════════════════════════════════════
-   SOCKET.IO CONNECTION
-════════════════════════════════════════ */
-function connectSocket() {
-  if (socket) socket.disconnect();
-  const token   = localStorage.getItem('fc_token');
-  const ioURL   = API || window.location.origin;   // Railway URL atau same-origin
-  socket = io(ioURL, {
-    auth:       { token },
-    transports: ['websocket', 'polling']
-  });
-
-  socket.on('connect', () => console.log('🔌 Socket connected'));
-  socket.on('connect_error', err => console.warn('Socket error:', err.message));
-
-  /* New message arriving */
-  socket.on('message:new', ({ chatId, message }) => {
-    if (chatId === currentChatId) appendMessage(message);
-    else incrementUnread(chatId);
-    refreshChatPreview(chatId, message.content || `[${message.type}]`, message.created_at);
-  });
-
-  /* Message deleted */
-  socket.on('message:deleted', ({ chatId, msgId }) => {
-    if (chatId === currentChatId) {
-      const el2 = document.querySelector(`[data-msg-id="${msgId}"]`);
-      if (el2) el2.querySelector('.msg-bubble').innerHTML =
-        '<em class="msg-deleted">Pesan telah dihapus</em>';
-    }
-  });
-
-  /* Reactions */
-  socket.on('message:reacted', ({ chatId, msgId, userId, emoji }) => {
-    if (chatId === currentChatId) refreshMessageReaction(msgId, userId, emoji);
-  });
-
-  /* Typing */
-  socket.on('typing:start', ({ chatId, userName }) => {
-    if (chatId === currentChatId) {
-      el('typing-area').innerHTML = `
-        <div class="typing-indicator">
-          <div class="t-dot"></div><div class="t-dot"></div><div class="t-dot"></div>
-          <span style="margin-left:4px;font-size:0.78rem">${esc(userName)} sedang mengetik…</span>
-        </div>`;
-    }
-  });
-  socket.on('typing:stop', ({ chatId }) => {
-    if (chatId === currentChatId) el('typing-area').innerHTML = '';
-  });
-
-  /* Presence */
-  socket.on('user:online', ({ userId, online }) => {
-    if (currentPartner?.id === userId) {
-      updatePartnerStatus({ ...currentPartner, online });
-    }
-    // Update di chat list
-    document.querySelectorAll(`.chat-item[data-partner-id="${userId}"] .online-dot`).forEach(dot => {
-      dot.className = 'online-dot' + (online ? '' : ' offline');
-    });
-  });
-
-  /* Chat updated (unread / last message) */
-  socket.on('chat:updated', () => loadChats());
-}
 
 /* ════════════════════════════════════════
    SIDEBAR PROFILE
@@ -381,7 +359,7 @@ window.filterContacts = function(q) {
    OPEN CHAT
 ════════════════════════════════════════ */
 async function openChat(chatId, partner) {
-  if (currentChatId) socket?.emit('chat:leave', currentChatId);
+  stopMessagePolling();
 
   currentChatId  = chatId;
   currentPartner = partner;
@@ -410,11 +388,9 @@ async function openChat(chatId, partner) {
   el('chat-partner-avatar').src = partner.photo_url || 'assets/default-avatar.svg';
   updatePartnerStatus(partner);
 
-  // Join socket room
-  socket?.emit('chat:join', chatId);
-
   // Load messages
   await loadMessages(chatId);
+  startMessagePolling(chatId);
 }
 
 function updatePartnerStatus(p) {
@@ -638,8 +614,6 @@ window.sendMessage = async function() {
     const data = await apiPost(`/api/chats/${currentChatId}/messages`, payload);
     appendMessage(data.message);
     refreshChatPreview(currentChatId, text, data.message.created_at);
-    // Broadcast via socket
-    socket?.emit('message:new', { chatId: currentChatId, message: data.message });
     sendPushNotif(text);
   } catch (err) {
     showToast('Gagal kirim pesan: ' + err.message, 'error');
@@ -651,11 +625,8 @@ window.sendMessage = async function() {
 ════════════════════════════════════════ */
 window.handleTyping = function() {
   if (!currentChatId) return;
-  socket?.emit('typing:start', { chatId: currentChatId });
   clearTimeout(typingTimer);
-  typingTimer = setTimeout(() => {
-    socket?.emit('typing:stop', { chatId: currentChatId });
-  }, 2500);
+  typingTimer = setTimeout(() => {}, 2500);
 };
 
 /* ════════════════════════════════════════
@@ -724,7 +695,6 @@ async function uploadAndSend(file, type, caption = '') {
     const data = await apiPost(`/api/chats/${currentChatId}/messages`, msgPayload);
     appendMessage(data.message);
     refreshChatPreview(currentChatId, msgPayload.content, data.message.created_at);
-    socket?.emit('message:new', { chatId: currentChatId, message: data.message });
     hideToast(toastEl);
     showToast('File terkirim! ✓', 'success');
   } catch (err) {
@@ -784,7 +754,6 @@ window.shareLocation = function() {
       const data = await apiPost(`/api/chats/${currentChatId}/messages`, payload);
       appendMessage(data.message);
       refreshChatPreview(currentChatId, `📍 ${locationName}`, data.message.created_at);
-      socket?.emit('message:new', { chatId: currentChatId, message: data.message });
       hideToast(t);
       showToast('Lokasi dibagikan!', 'success');
     } catch (err) {
@@ -826,7 +795,6 @@ window.deleteMsg = async function() {
   if (!confirm('Hapus pesan ini?')) return;
   try {
     await apiDelete(`/api/chats/${currentChatId}/messages/${contextMsgData.id}`);
-    socket?.emit('message:deleted', { chatId: currentChatId, msgId: contextMsgData.id });
     const wrapper = document.querySelector(`[data-msg-id="${contextMsgData.id}"]`);
     if (wrapper) wrapper.querySelector('.msg-bubble').innerHTML = '<em class="msg-deleted">Pesan telah dihapus</em>';
     showToast('Pesan dihapus');
@@ -838,7 +806,6 @@ window.deleteMsg = async function() {
 async function addReaction(msgId, emoji) {
   if (!currentChatId) return;
   await apiPatch(`/api/chats/${currentChatId}/messages/${msgId}/reactions`, { emoji });
-  socket?.emit('message:reacted', { chatId: currentChatId, msgId, userId: currentUser.id, emoji });
 }
 
 /* ════════════════════════════════════════
