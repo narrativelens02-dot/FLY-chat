@@ -3,20 +3,20 @@
  * FLYchat — File Upload Route
  *
  * Mode otomatis:
- *   - Jika CLOUDINARY_CLOUD_NAME + CLOUDINARY_API_KEY + CLOUDINARY_API_SECRET tersedia
- *     → upload ke Cloudinary (persistent, cocok untuk Railway/Render/Vercel)
- *   - Jika tidak → fallback ke disk lokal di /uploads (tidak persisten di cloud)
+ *   - Jika CLOUDINARY_* tersedia → upload ke Cloudinary v2 (persistent)
+ *   - Jika tidak             → fallback ke disk lokal
+ *
+ * Cloudinary upload menggunakan multer memoryStorage + upload_stream
+ * (tanpa multer-storage-cloudinary yang tidak support cloudinary v2)
  */
-const router = require('express').Router();
-const multer = require('multer');
-const path   = require('path');
-const fs     = require('fs');
+const router   = require('express').Router();
+const multer   = require('multer');
+const path     = require('path');
+const fs       = require('fs');
 const { v4: uuid } = require('uuid');
-const auth   = require('../middleware/auth');
+const auth     = require('../middleware/auth');
 
-/* ─────────────────────────────────────────
-   Deteksi mode upload
-───────────────────────────────────────── */
+/* ─── Deteksi mode ─────────────────────────── */
 const USE_CLOUDINARY = !!(
   process.env.CLOUDINARY_CLOUD_NAME &&
   process.env.CLOUDINARY_API_KEY &&
@@ -24,54 +24,35 @@ const USE_CLOUDINARY = !!(
   !process.env.CLOUDINARY_CLOUD_NAME.includes('your_cloud_name')
 );
 
-/* ─────────────────────────────────────────
-   CLOUDINARY MODE
-───────────────────────────────────────── */
-function buildCloudinaryUploader() {
-  const cloudinary          = require('cloudinary').v2;
-  const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const BLOCKED_EXT  = ['.exe','.bat','.sh','.cmd','.ps1','.js','.php','.py','.rb','.pl'];
+const MAX_MB       = parseInt(process.env.MAX_FILE_SIZE_MB || '50');
 
+/* ═══════════════════════════════════════════
+   CLOUDINARY MODE — multer memoryStorage +
+   cloudinary.uploader.upload_stream
+═══════════════════════════════════════════ */
+function buildCloudinaryRoutes(router) {
+  const cloudinary = require('cloudinary').v2;
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key:    process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET
   });
 
-  const MAX_MB = parseInt(process.env.MAX_FILE_SIZE_MB || '50');
+  /* Upload ke Cloudinary dari buffer */
+  function uploadToCloudinary(buffer, options) {
+    return new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(options, (err, result) => {
+        if (err) return reject(err);
+        resolve(result);
+      });
+      stream.end(buffer);
+    });
+  }
 
-  // Storage chat (gambar, video, dokumen)
-  const chatStorage = new CloudinaryStorage({
-    cloudinary,
-    params: async (req, file) => {
-      const isImage    = file.mimetype.startsWith('image/');
-      const isVideo    = file.mimetype.startsWith('video/');
-      const resourceType = isImage ? 'image' : isVideo ? 'video' : 'raw';
-      return {
-        folder:        'flychat/chat',
-        resource_type: resourceType,
-        public_id:     `${Date.now()}_${uuid()}`,
-        // Aktifkan transformasi untuk gambar agar dioptimasi
-        ...(isImage && {
-          transformation: [{ quality: 'auto', fetch_format: 'auto' }]
-        })
-      };
-    }
-  });
-
-  // Storage avatar
-  const avatarStorage = new CloudinaryStorage({
-    cloudinary,
-    params: {
-      folder:        'flychat/avatars',
-      resource_type: 'image',
-      transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face', quality: 'auto' }]
-    }
-  });
-
-  const BLOCKED_EXT = ['.exe', '.bat', '.sh', '.cmd', '.ps1', '.js', '.php', '.py'];
-
-  const chatUpload = multer({
-    storage: chatStorage,
+  /* multer dengan memoryStorage (buffer, tidak tulis ke disk) */
+  const chatMulter = multer({
+    storage: multer.memoryStorage(),
     limits:  { fileSize: MAX_MB * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
       const ext = path.extname(file.originalname).toLowerCase();
@@ -80,8 +61,8 @@ function buildCloudinaryUploader() {
     }
   });
 
-  const avatarUpload = multer({
-    storage: avatarStorage,
+  const avatarMulter = multer({
+    storage: multer.memoryStorage(),
     limits:  { fileSize: 5 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
       if (!file.mimetype.startsWith('image/')) return cb(new Error('Hanya file gambar yang diizinkan'));
@@ -89,44 +70,74 @@ function buildCloudinaryUploader() {
     }
   });
 
-  return {
-    chatUpload,
-    avatarUpload,
-    getFileURL:   (req) => req.file.path,          // Cloudinary mengembalikan URL lengkap di path
-    getPhotoURL:  (req) => req.file.path
-  };
-}
+  /* POST /api/upload/file */
+  router.post('/file', auth, chatMulter.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
+    try {
+      const isImage = req.file.mimetype.startsWith('image/');
+      const isVideo = req.file.mimetype.startsWith('video/');
+      const resourceType = isImage ? 'image' : isVideo ? 'video' : 'raw';
 
-/* ─────────────────────────────────────────
-   LOCAL DISK MODE (fallback)
-───────────────────────────────────────── */
-function buildLocalUploader() {
-  const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || 'uploads');
-  const AVATAR_DIR = path.join(UPLOAD_DIR, 'avatars');
-  const CHAT_DIR   = path.join(UPLOAD_DIR, 'chat');
+      const result = await uploadToCloudinary(req.file.buffer, {
+        folder:        'flychat/chat',
+        resource_type: resourceType,
+        public_id:     `${Date.now()}_${uuid()}`,
+        ...(isImage && { transformation: [{ quality: 'auto', fetch_format: 'auto' }] })
+      });
 
-  [UPLOAD_DIR, AVATAR_DIR, CHAT_DIR].forEach(d => {
-    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+      res.json({
+        fileURL:  result.secure_url,
+        fileName: req.file.originalname,
+        fileSize: formatSize(req.file.size),
+        mimeType: req.file.mimetype,
+        storage:  'cloudinary'
+      });
+    } catch (err) {
+      console.error('Cloudinary upload error:', err.message);
+      res.status(500).json({ error: 'Upload gagal: ' + err.message });
+    }
   });
 
-  const MAX_MB    = parseInt(process.env.MAX_FILE_SIZE_MB || '50');
-  const BLOCKED_EXT = ['.exe', '.bat', '.sh', '.cmd', '.ps1', '.js', '.php', '.py'];
+  /* POST /api/upload/avatar */
+  router.post('/avatar', auth, avatarMulter.single('avatar'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
+    try {
+      const result = await uploadToCloudinary(req.file.buffer, {
+        folder:         'flychat/avatars',
+        resource_type:  'image',
+        public_id:      `${Date.now()}_${uuid()}`,
+        transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face', quality: 'auto' }]
+      });
+
+      res.json({ photoURL: result.secure_url, storage: 'cloudinary' });
+    } catch (err) {
+      console.error('Cloudinary avatar error:', err.message);
+      res.status(500).json({ error: 'Upload avatar gagal: ' + err.message });
+    }
+  });
+
+  console.log('☁️  Upload mode: Cloudinary v2 (memory stream)');
+}
+
+/* ═══════════════════════════════════════════
+   LOCAL DISK MODE — fallback
+═══════════════════════════════════════════ */
+function buildLocalRoutes(router) {
+  const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || 'uploads');
+
+  ['chat', 'avatars'].forEach(sub => {
+    const dir = path.join(UPLOAD_DIR, sub);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  });
 
   function makeStorage(subdir) {
     return multer.diskStorage({
-      destination: (req, file, cb) => {
-        const dir = path.join(UPLOAD_DIR, subdir);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        cb(null, dir);
-      },
-      filename: (req, file, cb) => {
-        const ext  = path.extname(file.originalname).toLowerCase();
-        cb(null, `${Date.now()}_${uuid()}${ext}`);
-      }
+      destination: (req, file, cb) => cb(null, path.join(UPLOAD_DIR, subdir)),
+      filename:    (req, file, cb) => cb(null, `${Date.now()}_${uuid()}${path.extname(file.originalname).toLowerCase()}`)
     });
   }
 
-  const chatUpload = multer({
+  const chatMulter = multer({
     storage: makeStorage('chat'),
     limits:  { fileSize: MAX_MB * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
@@ -136,7 +147,7 @@ function buildLocalUploader() {
     }
   });
 
-  const avatarUpload = multer({
+  const avatarMulter = multer({
     storage: makeStorage('avatars'),
     limits:  { fileSize: 5 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
@@ -145,83 +156,43 @@ function buildLocalUploader() {
     }
   });
 
-  return {
-    chatUpload,
-    avatarUpload,
-    getFileURL:  (req) => `/uploads/chat/${req.file.filename}`,
-    getPhotoURL: (req) => `/uploads/avatars/${req.file.filename}`
-  };
-}
-
-/* ─────────────────────────────────────────
-   Inisialisasi uploader sesuai mode
-───────────────────────────────────────── */
-let uploader;
-try {
-  if (USE_CLOUDINARY) {
-    uploader = buildCloudinaryUploader();
-    console.log('☁️  Upload mode: Cloudinary');
-  } else {
-    uploader = buildLocalUploader();
-    console.log('💾 Upload mode: Disk lokal (atur CLOUDINARY_* di .env untuk cloud storage)');
-  }
-} catch (err) {
-  console.error('⚠️  Upload init error, fallback ke disk lokal:', err.message);
-  uploader = buildLocalUploader();
-}
-
-/* ─────────────────────────────────────────
-   ROUTES
-───────────────────────────────────────── */
-
-/* Upload file chat (gambar / video / dokumen) */
-router.post('/file', auth, (req, res, next) => {
-  uploader.chatUpload.single('file')(req, res, (err) => {
-    if (err) return next(err);
+  router.post('/file', auth, chatMulter.single('file'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
-
     res.json({
-      fileURL:   uploader.getFileURL(req),
-      fileName:  req.file.originalname,
-      fileSize:  formatSize(req.file.size || 0),
-      mimeType:  req.file.mimetype,
-      storage:   USE_CLOUDINARY ? 'cloudinary' : 'local'
+      fileURL:  `/uploads/chat/${req.file.filename}`,
+      fileName: req.file.originalname,
+      fileSize: formatSize(req.file.size),
+      mimeType: req.file.mimetype,
+      storage:  'local'
     });
   });
-});
 
-/* Upload avatar */
-router.post('/avatar', auth, (req, res, next) => {
-  uploader.avatarUpload.single('avatar')(req, res, (err) => {
-    if (err) return next(err);
+  router.post('/avatar', auth, avatarMulter.single('avatar'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
-
-    res.json({
-      photoURL: uploader.getPhotoURL(req),
-      storage:  USE_CLOUDINARY ? 'cloudinary' : 'local'
-    });
+    res.json({ photoURL: `/uploads/avatars/${req.file.filename}`, storage: 'local' });
   });
-});
 
-/* Info mode upload saat ini */
+  console.log('💾 Upload mode: Disk lokal (atur CLOUDINARY_* di .env untuk cloud storage)');
+}
+
+/* ─── Init ──────────────────────────────── */
+if (USE_CLOUDINARY) {
+  buildCloudinaryRoutes(router);
+} else {
+  buildLocalRoutes(router);
+}
+
+/* Info endpoint */
 router.get('/info', auth, (req, res) => {
-  res.json({
-    mode:    USE_CLOUDINARY ? 'cloudinary' : 'local',
-    maxSize: `${process.env.MAX_FILE_SIZE_MB || 50}MB`
-  });
+  res.json({ mode: USE_CLOUDINARY ? 'cloudinary' : 'local', maxSize: `${MAX_MB}MB` });
 });
 
 /* Error handler multer */
 router.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError || err.message) {
-    return res.status(400).json({ error: err.message });
-  }
-  next(err);
+  if (err) return res.status(400).json({ error: err.message });
+  next();
 });
 
-/* ─────────────────────────────────────────
-   HELPER
-───────────────────────────────────────── */
 function formatSize(b) {
   if (b < 1024)    return `${b} B`;
   if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
