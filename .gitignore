@@ -1,23 +1,44 @@
+# =============================================
+# FLYchat — .gitignore
+# =============================================
+
 # Dependencies
 node_modules/
 
-# Environment — JANGAN commit ke git!
+# ⚠️  Environment — JANGAN PERNAH commit ke git!
 .env
 .env.local
 .env.production
-# .env.vercel boleh di-commit karena hanya berisi nama key (reference)
+.env.development
+# .env.vercel TIDAK di-commit (berisi credentials nyata)
+.env.vercel
 
-# Upload files
+# Upload files (file user, tidak perlu di-git)
 uploads/
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Logs
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Editor
 .vscode/
+.idea/
 *.swp
+*.swo
+
+# Build / cache
+.vercel/
+.next/
+dist/
+build/
+
+# Windows
+Thumbs.db
+ehthumbs.db

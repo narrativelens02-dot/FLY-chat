@@ -450,6 +450,123 @@
   </div>
 </div>
 
+<!-- ===================== FORGOT PASSWORD MODAL ===================== -->
+<div id="forgot-password-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="forgot-title">
+  <div class="modal-content" style="max-width:420px">
+    <div class="modal-header">
+      <h3 id="forgot-title">🔑 Lupa Password</h3>
+      <button onclick="closeForgotModal()" aria-label="Tutup">✕</button>
+    </div>
+    <div style="padding:4px 0 12px">
+      <p style="font-size:.9rem;color:var(--text-m);margin:0 0 16px;line-height:1.5">
+        Masukkan email akun kamu. Kami akan mengirimkan link untuk membuat password baru.
+      </p>
+      <div id="forgot-modal-error"  class="error-msg   hidden" style="margin-bottom:12px"></div>
+      <div id="forgot-modal-success" class="success-msg hidden" style="margin-bottom:12px;padding:10px 14px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;color:#166534;font-size:.87rem"></div>
+      <div class="input-group" style="margin-bottom:16px">
+        <span class="input-icon">✉️</span>
+        <input type="email" id="forgot-modal-email" placeholder="Email akun kamu"
+          onkeydown="if(event.key==='Enter')submitForgotPassword()" autocomplete="email"/>
+      </div>
+      <button class="btn-primary" id="forgot-btn-submit" onclick="submitForgotPassword()" style="margin-bottom:0">
+        <span class="btn-text">Kirim Link Reset</span>
+        <span class="spinner hidden"></span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== RESET PASSWORD SCREEN ===================== -->
+<div id="reset-password-screen" class="screen">
+  <div class="auth-bg">
+    <div class="auth-container">
+      <div class="auth-logo">
+        <svg viewBox="0 0 120 96" xmlns="http://www.w3.org/2000/svg">
+          <path d="M60 12 C36 12, 6 30, 6 54 C6 66, 18 78, 36 72 C42 70, 48 62, 60 54 C72 62, 78 70, 84 72 C102 78, 114 66, 114 54 C114 30, 84 12, 60 12Z" fill="#7d2535"/>
+          <path d="M60 54 C54 42, 42 33, 30 30 C42 26, 58 34, 60 12 C62 34, 78 26, 90 30 C78 33, 66 42, 60 54Z" fill="rgba(125,37,53,0.35)"/>
+        </svg>
+        <span class="auth-logo-name">FLYchat</span>
+      </div>
+      <h2>Buat Password Baru</h2>
+      <p class="auth-subtitle">Masukkan password baru untuk akun kamu</p>
+      <input type="hidden" id="reset-token-hidden" />
+      <div id="reset-pw-error" class="error-msg hidden" style="margin-bottom:12px"></div>
+      <div class="input-group">
+        <span class="input-icon">🔒</span>
+        <input type="password" id="reset-new-password" placeholder="Password baru (min. 6 karakter)"
+          required minlength="6" autocomplete="new-password" />
+        <button type="button" class="toggle-pw" onclick="togglePassword('reset-new-password',this)" aria-label="Lihat password">👁</button>
+      </div>
+      <div class="input-group">
+        <span class="input-icon">🔒</span>
+        <input type="password" id="reset-confirm-password" placeholder="Konfirmasi password baru"
+          required autocomplete="new-password" />
+        <button type="button" class="toggle-pw" onclick="togglePassword('reset-confirm-password',this)" aria-label="Lihat password">👁</button>
+      </div>
+      <button class="btn-primary" id="reset-pw-btn" onclick="submitResetPassword()">
+        <span class="btn-text">Simpan Password Baru</span>
+        <span class="spinner hidden"></span>
+      </button>
+      <p class="switch-auth" style="margin-top:16px">
+        <a href="#" onclick="showScreen('login-screen')">← Kembali ke Login</a>
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== INCOMING CALL MODAL ===================== -->
+<div id="incoming-call-modal" class="modal hidden call-modal-overlay" role="dialog" aria-modal="true" aria-label="Panggilan masuk">
+  <div class="call-modal-box incoming-call-box">
+    <img id="incoming-caller-avatar" src="assets/default-avatar.svg" alt="" class="call-avatar" />
+    <div id="incoming-caller-name" class="call-partner-name">Seseorang</div>
+    <div id="incoming-call-type"   class="call-type-label">📞 Voice Call</div>
+    <p style="font-size:.85rem;color:var(--text-m);margin:0 0 24px">Panggilan masuk…</p>
+    <div class="call-actions">
+      <button class="call-btn reject-btn" onclick="rejectCall()" aria-label="Tolak">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="26" height="26"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.63 18.5a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.32 4.18 2 2 0 0 1 4.3 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l.94-.94a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17z" transform="rotate(135,12,12)"/></svg>
+      </button>
+      <button class="call-btn accept-btn" onclick="acceptCall()" aria-label="Terima">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="26" height="26"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.63 18.5a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.32 4.18 2 2 0 0 1 4.3 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l.94-.94a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17z"/></svg>
+      </button>
+    </div>
+    <div style="display:flex;justify-content:space-around;font-size:.75rem;color:var(--text-light);margin-top:8px">
+      <span>Tolak</span><span>Terima</span>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== ACTIVE CALL MODAL ===================== -->
+<div id="call-modal" class="modal hidden call-modal-overlay" role="dialog" aria-modal="true" aria-label="Panggilan aktif">
+  <div class="call-modal-box active-call-box">
+    <div id="call-modal-title" class="call-modal-title">📞 Voice Call</div>
+
+    <!-- Remote video (video call) -->
+    <video id="call-remote-video" class="call-video call-remote" autoplay playsinline style="display:none"></video>
+    <!-- Remote audio (voice call) -->
+    <audio id="call-remote-audio" autoplay></audio>
+
+    <!-- Partner info (saat tidak ada video) -->
+    <div id="call-partner-display" style="text-align:center;padding:16px 0">
+      <img id="call-partner-avatar" src="assets/default-avatar.svg" class="call-avatar" alt="" />
+      <div id="call-partner-name" class="call-partner-name">Partner</div>
+      <div id="call-status"  class="call-status-text">Menghubungi…</div>
+      <div id="call-timer"   class="call-timer">00:00</div>
+    </div>
+
+    <!-- Local video (picture-in-picture) -->
+    <video id="call-local-video" class="call-video call-local" autoplay playsinline muted style="display:none"></video>
+
+    <!-- Controls -->
+    <div class="call-controls">
+      <button class="call-ctrl-btn" id="btn-toggle-mic" onclick="toggleMic()" title="Mute/Unmute" aria-label="Toggle mikrofon">🎤</button>
+      <button class="call-ctrl-btn" id="btn-toggle-cam" onclick="toggleCamera()" title="Kamera" aria-label="Toggle kamera" style="display:none">📷</button>
+      <button class="call-ctrl-btn end-call-btn" onclick="endCall()" title="Akhiri" aria-label="Akhiri panggilan">
+        <svg viewBox="0 0 24 24" fill="currentColor" width="24" height="24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 11.63 18.5a19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.32 4.18 2 2 0 0 1 4.3 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l.94-.94a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 17z" transform="rotate(135,12,12)"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- Runtime config -->
 <script src="config.js"></script>
 <!-- FLYchat App -->

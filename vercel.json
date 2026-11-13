@@ -25,6 +25,14 @@
       "dest": "/public/sw.js"
     },
     {
+      "src": "/manifest.json",
+      "dest": "/public/manifest.json"
+    },
+    {
+      "src": "/config.js",
+      "dest": "/public/config.js"
+    },
+    {
       "src": "/(.*\\.(js|css|svg|png|ico|json|webp|woff2?))",
       "dest": "/public/$1"
     },
@@ -40,6 +48,13 @@
         { "key": "Access-Control-Allow-Origin",  "value": "*" },
         { "key": "Access-Control-Allow-Methods", "value": "GET,POST,PATCH,DELETE,OPTIONS" },
         { "key": "Access-Control-Allow-Headers", "value": "Content-Type,Authorization" }
+      ]
+    },
+    {
+      "source": "/sw.js",
+      "headers": [
+        { "key": "Service-Worker-Allowed", "value": "/" },
+        { "key": "Cache-Control",          "value": "no-cache, no-store, must-revalidate" }
       ]
     }
   ]

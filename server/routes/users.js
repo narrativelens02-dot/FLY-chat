@@ -69,14 +69,33 @@ router.get('/me/contacts', auth, async (req, res) => {
   res.json({ contacts: rows });
 });
 
-/* ── Add contact ── */
+/* ── Add contact (simetris: A→B sekaligus B→A) ── */
 router.post('/me/contacts', auth, async (req, res) => {
   const { contact_id } = req.body;
   if (!contact_id) return res.status(400).json({ error: 'contact_id diperlukan' });
+  if (contact_id === req.user.id) return res.status(400).json({ error: 'Tidak bisa menambah diri sendiri' });
+
+  // Verifikasi user yang ditambah ada
+  const [target] = await sql`SELECT id FROM users WHERE id = ${contact_id}`;
+  if (!target) return res.status(404).json({ error: 'Pengguna tidak ditemukan' });
+
+  // Insert dua arah sekaligus (simetris) — keduanya ON CONFLICT DO NOTHING agar idempotent
   await sql`
     INSERT INTO contacts (owner_id, contact_id) VALUES (${req.user.id}, ${contact_id})
     ON CONFLICT DO NOTHING
   `;
+  await sql`
+    INSERT INTO contacts (owner_id, contact_id) VALUES (${contact_id}, ${req.user.id})
+    ON CONFLICT DO NOTHING
+  `;
+  res.json({ ok: true });
+});
+
+/* ── Remove contact (simetris: hapus dua arah) ── */
+router.delete('/me/contacts/:contactId', auth, async (req, res) => {
+  const { contactId } = req.params;
+  await sql`DELETE FROM contacts WHERE owner_id = ${req.user.id} AND contact_id = ${contactId}`;
+  await sql`DELETE FROM contacts WHERE owner_id = ${contactId} AND contact_id = ${req.user.id}`;
   res.json({ ok: true });
 });
 

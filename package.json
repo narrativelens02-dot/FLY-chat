@@ -7,24 +7,28 @@
   "scripts": {
     "dev":            "node server/index.js",
     "start":          "node server/index.js",
-    "build":          "echo Build OK",
+    "build":          "node -e \"console.log('Build OK')\"",
     "deploy":         "node deploy.js",
     "deploy:vercel":  "node node_modules/vercel/dist/index.js --prod",
     "deploy:railway": "node node_modules/@railway/cli/bin/run.js up"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.9.4",
-    "bcryptjs":                 "^2.4.3",
-    "cors":                     "^2.8.5",
-    "dotenv":                   "^16.4.5",
-    "express":                  "^4.19.2",
-    "jsonwebtoken":             "^9.0.2",
-    "multer":                   "^1.4.5-lts.1",
-    "socket.io":                "^4.7.5",
-    "uuid":                     "^9.0.1"
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "google-auth-library": "^11.3.4",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "multer-storage-cloudinary": "^4.0.0",
+    "nodemailer": "^10.5.0",
+    "socket.io": "^4.7.5",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@railway/cli": "^5.71.0",
-    "vercel":       "^39.3.0"
+    "vercel": "^39.3.0"
   }
 }

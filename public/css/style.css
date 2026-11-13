@@ -1720,3 +1720,200 @@ body {
 @media (max-width: 1024px) {
   :root { --sidebar-width: 300px; }
 }
+
+/* ============================================================
+   FLYchat — Added Components CSS
+   - Forgot Password Modal
+   - Reset Password Screen
+   - WebRTC Call Modals (Voice & Video)
+   ============================================================ */
+
+/* ── Success message (forgot password) ── */
+.success-msg {
+  padding: 10px 14px;
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-radius: 8px;
+  color: #166534;
+  font-size: .87rem;
+  line-height: 1.5;
+}
+[data-theme="dark"] .success-msg {
+  background: #052e16;
+  border-color: #166534;
+  color: #86efac;
+}
+
+/* ── Call Modal Overlay ── */
+.call-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.72);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+}
+.call-modal-overlay.hidden { display: none; }
+
+/* ── Call Modal Box ── */
+.call-modal-box {
+  background: var(--bg-card);
+  border-radius: 24px;
+  padding: 28px 24px 24px;
+  width: min(92vw, 380px);
+  box-shadow: 0 24px 60px rgba(0,0,0,.4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  animation: callModalIn .25s ease;
+}
+@keyframes callModalIn {
+  from { transform: scale(.88) translateY(16px); opacity: 0; }
+  to   { transform: scale(1)   translateY(0);    opacity: 1; }
+}
+
+.call-avatar {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 3px solid var(--primary);
+  margin-bottom: 12px;
+}
+
+.call-partner-name {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-h);
+  margin-bottom: 4px;
+}
+
+.call-type-label {
+  font-size: .88rem;
+  color: var(--primary);
+  margin-bottom: 4px;
+}
+
+.call-status-text {
+  font-size: .85rem;
+  color: var(--text-m);
+  margin-bottom: 4px;
+}
+
+.call-timer {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 20px;
+}
+
+.call-modal-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-m);
+  margin-bottom: 16px;
+  align-self: flex-start;
+}
+
+/* ── Incoming call buttons ── */
+.call-actions {
+  display: flex;
+  gap: 40px;
+  margin-bottom: 4px;
+}
+
+.call-btn {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .15s, box-shadow .15s;
+}
+.call-btn:hover { transform: scale(1.1); }
+
+.accept-btn {
+  background: #22c55e;
+  color: white;
+  box-shadow: 0 4px 16px rgba(34,197,94,.4);
+}
+.reject-btn {
+  background: #ef4444;
+  color: white;
+  box-shadow: 0 4px 16px rgba(239,68,68,.4);
+}
+
+/* ── Active call controls ── */
+.call-controls {
+  display: flex;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.call-ctrl-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--bg-input);
+  font-size: 1.2rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s, transform .15s;
+}
+.call-ctrl-btn:hover { background: var(--primary-muted); transform: scale(1.08); }
+
+.end-call-btn {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: white;
+  box-shadow: 0 4px 14px rgba(239,68,68,.35);
+}
+.end-call-btn:hover { background: #dc2626; }
+
+/* ── Video call streams ── */
+.active-call-box {
+  position: relative;
+  overflow: hidden;
+}
+
+.call-video {
+  border-radius: 12px;
+  object-fit: cover;
+}
+
+.call-remote {
+  width: 100%;
+  max-height: 260px;
+  background: #000;
+  display: block;
+}
+
+.call-local {
+  position: absolute;
+  top: 60px;
+  right: 12px;
+  width: 90px;
+  height: 120px;
+  border-radius: 10px;
+  border: 2px solid white;
+  object-fit: cover;
+  box-shadow: var(--shadow-md);
+}
+
+/* ── Responsive call modals ── */
+@media (max-width: 480px) {
+  .call-modal-box { padding: 20px 16px; }
+  .call-avatar     { width: 64px; height: 64px; }
+  .call-partner-name { font-size: 1rem; }
+}

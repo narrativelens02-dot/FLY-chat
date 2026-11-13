@@ -5,10 +5,12 @@
 |----------|-----------|
 | Database | Neon Postgres (PostgreSQL 18) |
 | Backend  | Node.js + Express + Socket.io |
-| Auth     | JWT + bcryptjs |
-| Storage  | Multer (file upload lokal di `/uploads`) |
+| Auth     | JWT + bcryptjs + Google OAuth (token verification) |
+| Storage  | Cloudinary (cloud) atau Multer disk (lokal) |
+| Email    | Nodemailer (SMTP — Gmail App Password / Mailtrap) |
 | Frontend | Vanilla HTML/CSS/JS (tanpa framework) |
-| Realtime | Socket.io WebSocket |
+| Realtime | Socket.io WebSocket + HTTP Polling (Vercel) |
+| Call     | WebRTC Peer-to-Peer (voice & video) |
 
 ## Struktur Project
 ```
@@ -16,16 +18,19 @@ FLYchat/
 ├── server/
 │   ├── index.js          ← Express + Socket.io server
 │   ├── db.js             ← Neon Postgres + auto schema migration
+│   ├── mailer.js         ← Nodemailer SMTP helper + email templates
 │   ├── routes/
-│   │   ├── auth.js       ← Register, Login, Google, Me, Logout
+│   │   ├── auth.js       ← Register, Login, Google, Me, Logout,
+│   │   │                    ForgotPassword, ResetPassword (lengkap)
 │   │   ├── users.js      ← Profile, Contacts, Search, Presence
 │   │   ├── chats.js      ← CRUD chats & messages, reactions
-│   │   └── upload.js     ← File & avatar upload (Multer)
+│   │   └── upload.js     ← Upload (Cloudinary atau disk lokal)
 │   └── middleware/
 │       └── auth.js       ← JWT verification middleware
 ├── public/               ← Frontend static files
-│   ├── index.html
-│   ├── js/app.js         ← Semua logika frontend
+│   ├── index.html        ← SPA + modal call, forgot pwd, reset pwd
+│   ├── config.js         ← Runtime config (API URL, Google Client ID)
+│   ├── js/app.js         ← Semua logika frontend + WebRTC
 │   ├── css/style.css
 │   └── assets/
 ├── uploads/              ← File yang diupload user (auto-created)
@@ -150,3 +155,121 @@ http://localhost:3000
 - Hapus riwayat chat
 - Keyboard shortcuts (Ctrl+K, Esc)
 - Offline caching (Service Worker)
+
+
+---
+
+## ⚙️ Konfigurasi Fitur Baru
+
+### 1. Google OAuth (Login Google)
+
+Dapatkan Google Client ID:
+1. Buka https://console.cloud.google.com
+2. Pilih project → **APIs & Services → Credentials**
+3. **Create Credentials → OAuth 2.0 Client ID**
+4. Tipe: **Web application**
+5. Authorized JavaScript origins:
+   - `http://localhost:3000` (development)
+   - `https://domain-produksi-kamu.com` (production)
+6. Copy **Client ID** (format: `xxxx.apps.googleusercontent.com`)
+
+Lalu isi di dua tempat:
+```
+# .env
+GOOGLE_CLIENT_ID=xxxxx.apps.googleusercontent.com
+
+# public/config.js
+window.__GOOGLE_CLIENT_ID__ = 'xxxxx.apps.googleusercontent.com';
+```
+
+Keamanan: Backend sekarang **memverifikasi signature** token Google via `google-auth-library` sebelum login/register.
+
+---
+
+### 2. Forgot Password / Reset Password (SMTP Email)
+
+**Opsi A — Gmail (Rekomendasi)**
+1. Aktifkan 2FA di akun Google
+2. Buka https://myaccount.google.com/apppasswords
+3. Buat App Password untuk "Mail" / "Other (Custom name)"
+4. Isi `.env`:
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=emailkamu@gmail.com
+SMTP_PASS=xxxx xxxx xxxx xxxx   ← app password 16 karakter
+EMAIL_FROM=FLYchat <emailkamu@gmail.com>
+FRONTEND_URL=http://localhost:3000
+```
+
+**Opsi B — Mailtrap (testing lokal, gratis)**
+1. Buat akun di https://mailtrap.io
+2. Sandbox → pilih inbox → pilih SMTP credentials
+```
+SMTP_HOST=sandbox.smtp.mailtrap.io
+SMTP_PORT=2525
+SMTP_USER=your_mailtrap_user
+SMTP_PASS=your_mailtrap_pass
+```
+
+Flow reset password:
+- User klik "Lupa password?" → isi email → dapat link di email
+- Link: `http://localhost:3000/reset-password?token=UUID`
+- Token valid **1 jam**, sekali pakai
+- Backend verifikasi token → update password di DB
+
+---
+
+### 3. Cloudinary (File Upload Cloud Persistent)
+
+Tanpa Cloudinary, file upload disimpan ke disk lokal — file akan hilang saat redeploy di Railway/Render.
+
+Setup Cloudinary (gratis 25GB):
+1. Buat akun di https://console.cloudinary.com
+2. **Settings → API Keys → Generate new pair**
+3. Isi `.env`:
+```
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=123456789012345
+CLOUDINARY_API_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Auto-detect: jika variabel Cloudinary terisi → pakai Cloudinary, jika tidak → fallback disk lokal.
+
+Cloudinary features yang aktif:
+- Gambar: auto-quality, auto-format (WebP/AVIF)
+- Avatar: crop ke 400×400, face-aware
+- Video: upload as-is (resource_type: video)
+- Dokumen: upload as raw
+
+---
+
+### 4. WebRTC Voice & Video Call
+
+Sudah berjalan out-of-the-box — tidak perlu konfigurasi tambahan.
+
+Cara kerja:
+- **Signaling via REST polling** (kompatibel dengan Vercel serverless)
+- Pesan signaling dikirim sebagai chat message dengan format JSON `{__rtc__: true, ...}`
+- Pesan signaling otomatis disaring — tidak ditampilkan sebagai chat bubble
+- **STUN servers**: Google STUN (gratis, tidak perlu konfigurasi)
+- **Peer-to-peer**: audio/video langsung antar browser setelah handshake
+
+Keterbatasan:
+- Jika kedua user di belakang **symmetric NAT** yang ketat (jaringan corporate), koneksi P2P mungkin gagal
+- Untuk keandalan lebih tinggi di production, tambahkan TURN server (coturn self-hosted atau Twilio TURN)
+
+Tambahkan TURN server di `app.js` jika diperlukan:
+```javascript
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    {
+      urls: 'turn:your-turn-server.com:3478',
+      username: 'your-username',
+      credential: 'your-password'
+    }
+  ]
+};
+```

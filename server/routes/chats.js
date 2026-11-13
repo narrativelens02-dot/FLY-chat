@@ -4,6 +4,13 @@ const auth   = require('../middleware/auth');
 const { sql } = require('../db');
 const { v4: uuid } = require('uuid');
 
+/**
+ * In-memory store untuk sinyal WebRTC (offer/answer/ICE).
+ * Tidak disimpan ke DB — hidup hanya 60 detik, cukup untuk handshake.
+ * Array of { chat_id, sender_id, content, created_at }
+ */
+const rtcStore = [];
+
 /* helper: apakah user adalah participant chat */
 async function assertParticipant(chatId, userId, res) {
   const [c] = await sql`SELECT * FROM chats WHERE id = ${chatId}`;
@@ -138,6 +145,30 @@ router.get('/:id/messages', auth, async (req, res) => {
   });
 
   const result = messages.map(m => ({ ...m, reactions: reactionMap[m.id] || {} }));
+
+  // Jika request polling (after param), sertakan sinyal RTC dari in-memory store
+  if (after) {
+    const rtcSignals = rtcStore.filter(s =>
+      s.chat_id === req.params.id &&
+      s.sender_id !== req.user.id &&
+      new Date(s.created_at) > new Date(after)
+    );
+    rtcSignals.forEach(s => {
+      result.push({
+        id:         `rtc_mem_${s.created_at}`,
+        chat_id:    s.chat_id,
+        sender_id:  s.sender_id,
+        type:       'text',
+        content:    s.content,
+        created_at: s.created_at,
+        is_deleted: false,
+        reactions:  {}
+      });
+    });
+    // Sort by created_at agar urut
+    result.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  }
+
   res.json({ messages: result });
 });
 
@@ -149,6 +180,35 @@ router.post('/:id/messages', auth, async (req, res) => {
   const { type = 'text', content = '', file_url = '', file_name = '',
           file_size = '', caption = '', lat, lng, location_name = '',
           reply_to_id, reply_to_sender = '', reply_to_text = '' } = req.body;
+
+  // ── WebRTC signaling: simpan sementara di memori, TIDAK ke DB ──
+  // Pesan dengan {__rtc__:true} adalah sinyal voice/video call,
+  // bukan pesan chat sungguhan — jangan polusi DB
+  if (type === 'text' && content) {
+    let sig;
+    try { sig = JSON.parse(content); } catch {}
+    if (sig?.__rtc__ === true) {
+      // Simpan ke in-memory store dengan TTL 60 detik
+      rtcStore.push({
+        chat_id:    req.params.id,
+        sender_id:  req.user.id,
+        content,
+        created_at: new Date().toISOString()
+      });
+      // Hapus sinyal lama (>60 detik) untuk mencegah memory leak
+      const cutoff = Date.now() - 60_000;
+      while (rtcStore.length && new Date(rtcStore[0].created_at).getTime() < cutoff) {
+        rtcStore.shift();
+      }
+      return res.status(201).json({
+        message: {
+          id: `rtc_${Date.now()}`, chat_id: req.params.id,
+          sender_id: req.user.id, type: 'text', content,
+          created_at: new Date().toISOString(), reactions: {}
+        }
+      });
+    }
+  }
 
   const msgId = uuid();
   const [msg] = await sql`

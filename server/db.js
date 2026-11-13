@@ -86,11 +86,22 @@ async function initDB() {
     )
   `;
 
+  await sql`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id         TEXT PRIMARY KEY,              -- UUID token
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      used       BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
   /* Indexes untuk performa */
   await sql`CREATE INDEX IF NOT EXISTS idx_chats_p1 ON chats(participant1_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_chats_p2 ON chats(participant2_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at ASC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_reset_user ON password_resets(user_id)`;
 
   console.log('✅ Database schema ready');
 }

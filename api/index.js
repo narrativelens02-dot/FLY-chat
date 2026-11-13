@@ -1,6 +1,11 @@
 /**
  * FLYchat — Vercel Serverless API Handler
- * Semua request /api/* ditangani di sini
+ * Semua request /api/* ditangani di sini.
+ *
+ * Keterbatasan Vercel Serverless:
+ *  - Tidak ada Socket.io (stateless) → frontend pakai polling
+ *  - Tidak ada disk write → upload file diblokir (perlu Cloudinary)
+ *  - Cold start: request pertama mungkin lambat ~1-2 detik
  */
 'use strict';
 require('dotenv').config();
@@ -14,20 +19,19 @@ app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-/* Routes */
+/* ── Routes ── */
 app.use('/api/auth',   require('../server/routes/auth'));
 app.use('/api/users',  require('../server/routes/users'));
 app.use('/api/chats',  require('../server/routes/chats'));
 
-/* Health */
-app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString(), env: 'vercel' }));
+/* Upload — Cloudinary support di Vercel (tidak ada disk write) */
+app.use('/api/upload', require('../server/routes/upload'));
 
-/* File upload tidak didukung di Vercel Serverless (no disk write)
-   Kembalikan error yang jelas */
-app.use('/api/upload', (req, res) => {
-  res.status(501).json({
-    error: 'Upload file tidak tersedia di mode Vercel. Gunakan server lokal untuk upload.'
-  });
-});
+/* Health check */
+app.get('/api/health', (req, res) => res.json({
+  ok: true,
+  time: new Date().toISOString(),
+  env: process.env.NODE_ENV || 'unknown'
+}));
 
 module.exports = app;

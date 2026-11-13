@@ -4,6 +4,7 @@ const bcrypt  = require('bcryptjs');
 const jwt     = require('jsonwebtoken');
 const { v4: uuid } = require('uuid');
 const { sql } = require('../db');
+const { sendMail, resetPasswordTemplate } = require('../mailer');
 
 const sign = (user) => jwt.sign(
   { id: user.id, email: user.email, name: user.name },
@@ -63,12 +64,68 @@ router.post('/login', async (req, res) => {
   }
 });
 
-/* ── Google OAuth (terima idToken, verifikasi manual tidak tersedia tanpa Firebase)
-   Solusi: frontend kirim profile dari Google Identity popup, backend buat/cari user ── */
+/* ── Google OAuth — Verifikasi ID Token via google-auth-library ── */
 router.post('/google', async (req, res) => {
   try {
-    const { email, name, photo_url, google_id } = req.body;
+    const { credential, email, name, photo_url } = req.body;
+
+    // Jika credential (ID token dari GSI) dikirim, verifikasi via Google
+    if (credential) {
+      let payload;
+      try {
+        const { OAuth2Client } = require('google-auth-library');
+        const clientId = process.env.GOOGLE_CLIENT_ID;
+        if (!clientId || clientId.includes('YOUR_GOOGLE_CLIENT_ID')) {
+          // Fallback: decode tanpa verifikasi jika Client ID belum diisi
+          // Ini mempertahankan kompatibilitas dengan mode development
+          console.warn('⚠️  GOOGLE_CLIENT_ID belum diisi, skip verifikasi signature');
+          const parts = credential.split('.');
+          payload = JSON.parse(Buffer.from(
+            parts[1].replace(/-/g, '+').replace(/_/g, '/'),
+            'base64'
+          ).toString('utf8'));
+        } else {
+          const client = new OAuth2Client(clientId);
+          const ticket = await client.verifyIdToken({
+            idToken:  credential,
+            audience: clientId
+          });
+          payload = ticket.getPayload();
+        }
+      } catch (verifyErr) {
+        console.error('Google token verify error:', verifyErr.message);
+        return res.status(401).json({ error: 'Token Google tidak valid' });
+      }
+
+      const googleEmail    = (payload.email || '').toLowerCase();
+      const googleName     = payload.name || googleEmail.split('@')[0];
+      const googlePhoto    = payload.picture || '';
+
+      if (!googleEmail) return res.status(400).json({ error: 'Email tidak ditemukan dalam token Google' });
+
+      let [user] = await sql`SELECT * FROM users WHERE email = ${googleEmail}`;
+      if (!user) {
+        const id = uuid();
+        ;[user] = await sql`
+          INSERT INTO users (id, email, name, photo_url)
+          VALUES (${id}, ${googleEmail}, ${googleName}, ${googlePhoto})
+          RETURNING id, email, name, photo_url, status, about, phone, show_online
+        `;
+      }
+      await sql`UPDATE users SET online = TRUE, last_seen = NOW() WHERE id = ${user.id}`;
+
+      const safe = { id: user.id, email: user.email, name: user.name,
+                     photo_url: user.photo_url, status: user.status,
+                     about: user.about, phone: user.phone, show_online: user.show_online };
+      return res.json({ token: sign(safe), user: safe });
+    }
+
+    // Legacy fallback: frontend kirim profile langsung (hanya untuk development)
     if (!email) return res.status(400).json({ error: 'Data Google tidak lengkap' });
+
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(400).json({ error: 'Mode ini tidak diizinkan di produksi. Kirim credential token.' });
+    }
 
     let [user] = await sql`SELECT * FROM users WHERE email = ${email.toLowerCase()}`;
     if (!user) {
@@ -112,13 +169,89 @@ router.post('/logout', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-/* ── Forgot password — kirim email (placeholder, perlu SMTP) ── */
+/* ── Forgot Password — kirim email dengan link reset ── */
 router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: 'Email wajib diisi' });
-  // TODO: integrate NodeMailer/Resend untuk kirim email reset
-  // Untuk sementara response success agar frontend tidak error
-  res.json({ message: 'Jika email terdaftar, link reset akan dikirim.' });
+
+  try {
+    const [user] = await sql`SELECT id, name, email FROM users WHERE email = ${email.toLowerCase()}`;
+
+    // Selalu return 200 agar tidak leak info akun terdaftar
+    if (!user) {
+      return res.json({ message: 'Jika email terdaftar, link reset akan dikirim.' });
+    }
+
+    // Hapus token lama yang belum dipakai untuk user ini
+    await sql`DELETE FROM password_resets WHERE user_id = ${user.id} AND used = FALSE`;
+
+    // Buat token reset (berlaku 1 jam)
+    const tokenId  = uuid();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // +1 jam
+    await sql`
+      INSERT INTO password_resets (id, user_id, expires_at)
+      VALUES (${tokenId}, ${user.id}, ${expiresAt.toISOString()})
+    `;
+
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const resetLink   = `${frontendUrl}/reset-password?token=${tokenId}`;
+
+    await sendMail(
+      user.email,
+      '🔑 Reset Password FLYchat',
+      resetPasswordTemplate(user.name, resetLink)
+    );
+
+    res.json({ message: 'Jika email terdaftar, link reset akan dikirim.' });
+  } catch (err) {
+    console.error('forgot-password error:', err.message);
+    // Jangan expose error detail SMTP ke client
+    if (err.message.includes('SMTP')) {
+      return res.status(503).json({ error: 'Layanan email sedang tidak tersedia. Coba lagi nanti.' });
+    }
+    res.status(500).json({ error: 'Gagal mengirim email' });
+  }
+});
+
+/* ── Verify Reset Token (cek apakah token valid) ── */
+router.get('/reset-password', async (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).json({ error: 'Token diperlukan' });
+
+  try {
+    const [reset] = await sql`
+      SELECT * FROM password_resets
+      WHERE id = ${token} AND used = FALSE AND expires_at > NOW()
+    `;
+    if (!reset) return res.status(400).json({ error: 'Token tidak valid atau sudah kedaluwarsa' });
+    res.json({ valid: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Gagal memverifikasi token' });
+  }
+});
+
+/* ── Reset Password — terapkan password baru ── */
+router.post('/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) return res.status(400).json({ error: 'Token dan password diperlukan' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password minimal 6 karakter' });
+
+  try {
+    const [reset] = await sql`
+      SELECT * FROM password_resets
+      WHERE id = ${token} AND used = FALSE AND expires_at > NOW()
+    `;
+    if (!reset) return res.status(400).json({ error: 'Token tidak valid atau sudah kedaluwarsa' });
+
+    const hash = await bcrypt.hash(password, 12);
+    await sql`UPDATE users SET password = ${hash} WHERE id = ${reset.user_id}`;
+    await sql`UPDATE password_resets SET used = TRUE WHERE id = ${token}`;
+
+    res.json({ message: 'Password berhasil diubah. Silakan login dengan password baru.' });
+  } catch (err) {
+    console.error('reset-password error:', err);
+    res.status(500).json({ error: 'Gagal mengubah password' });
+  }
 });
 
 module.exports = router;

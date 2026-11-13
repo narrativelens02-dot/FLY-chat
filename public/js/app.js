@@ -36,6 +36,9 @@ window.addEventListener('DOMContentLoaded', () => {
   loadTheme();
   setupFormListeners();   // ← pasang form listeners setelah DOM siap
 
+  // Cek apakah halaman ini adalah halaman reset password
+  handleResetPasswordPage();
+
   const token = localStorage.getItem('fc_token');
   if (token) {
     apiGet('/api/auth/me')
@@ -48,7 +51,10 @@ window.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => showScreen('login-screen'), 2000);
       });
   } else {
-    setTimeout(() => showScreen('login-screen'), 2000);
+    // Jangan redirect ke login jika sedang di reset-password
+    if (!window.location.search.includes('token=')) {
+      setTimeout(() => showScreen('login-screen'), 2000);
+    }
   }
 });
 
@@ -122,14 +128,22 @@ function startMessagePolling(chatId) {
     try {
       const qs   = lastMsgTime ? `?after=${encodeURIComponent(lastMsgTime)}` : '';
       const data = await apiGet(`/api/chats/${chatId}/messages${qs}`);
-      (data.messages || []).forEach(msg => {
+      (data.messages || []).forEach(async msg => {
+        if (!lastMsgTime || new Date(msg.created_at) > new Date(lastMsgTime))
+          lastMsgTime = msg.created_at;
+
         if (msg.sender_id !== currentUser.id) {
+          // Cek apakah ini sinyal WebRTC — jika ya, proses tapi jangan tampilkan sebagai pesan
+          let sig;
+          try { sig = JSON.parse(msg.content); } catch {}
+          if (sig?.__rtc__) {
+            await processRtcSignal(msg);
+            return; // jangan render sebagai bubble chat
+          }
           appendMessage(msg);
           sendPushNotif(msg.content || `[${msg.type}]`);
           incrementUnread(chatId);
         }
-        if (!lastMsgTime || new Date(msg.created_at) > new Date(lastMsgTime))
-          lastMsgTime = msg.created_at;
       });
     } catch {}
   }, 2000);
@@ -154,11 +168,17 @@ window.showScreen = function(id) {
    AUTH — GOOGLE (via Google Identity Services)
 ════════════════════════════════════════ */
 window.signInWithGoogle = function() {
+  const clientId = window.__GOOGLE_CLIENT_ID__;
+  if (!clientId || clientId.includes('YOUR_GOOGLE_CLIENT_ID')) {
+    showToast('Google Client ID belum dikonfigurasi. Isi window.__GOOGLE_CLIENT_ID__ di config.js', 'error');
+    return;
+  }
   // Load Google Identity script once
   if (!window.google) {
     const s = document.createElement('script');
     s.src = 'https://accounts.google.com/gsi/client';
-    s.onload = initGoogleAuth;
+    s.onerror = () => showToast('Gagal memuat Google SDK. Cek koneksi internet.', 'error');
+    s.onload  = initGoogleAuth;
     document.head.appendChild(s);
   } else {
     initGoogleAuth();
@@ -167,26 +187,28 @@ window.signInWithGoogle = function() {
 
 function initGoogleAuth() {
   if (!window.google?.accounts) { showToast('Google SDK gagal dimuat', 'error'); return; }
+  const clientId = window.__GOOGLE_CLIENT_ID__;
   google.accounts.id.initialize({
-    // Isi dengan Google Client ID kamu dari Google Cloud Console
-    client_id: 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com',
-    callback: handleGoogleCredential,
-    auto_select: false
+    client_id:   clientId,
+    callback:    handleGoogleCredential,
+    auto_select: false,
+    cancel_on_tap_outside: true
   });
-  google.accounts.id.prompt();
+  google.accounts.id.prompt((notification) => {
+    if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+      // Fallback: tampilkan popup jika one-tap tidak muncul
+      google.accounts.id.renderButton(
+        document.getElementById('google-btn-container') || document.body,
+        { theme: 'outline', size: 'large', text: 'signin_with', locale: 'id' }
+      );
+    }
+  });
 }
 
 async function handleGoogleCredential(response) {
-  // Decode JWT payload dari Google
-  const parts   = response.credential.split('.');
-  const payload = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
   try {
-    const data = await apiPost('/api/auth/google', {
-      email:      payload.email,
-      name:       payload.name,
-      photo_url:  payload.picture,
-      google_id:  payload.sub
-    });
+    // Kirim raw credential (ID token) ke backend untuk diverifikasi
+    const data = await apiPost('/api/auth/google', { credential: response.credential });
     localStorage.setItem('fc_token', data.token);
     currentUser = normalizeUser(data.user);
     showToast('Login Google berhasil! 🎉', 'success');
@@ -211,14 +233,90 @@ window.confirmLogout = function() {
 /* ════════════════════════════════════════
    AUTH — FORGOT PASSWORD
 ════════════════════════════════════════ */
-window.forgotPassword = async function() {
-  const email = prompt('Masukkan email akun kamu:');
-  if (!email) return;
+window.forgotPassword = function() {
+  // Tampilkan modal forgot password
+  el('forgot-modal-email').value = el('login-email')?.value || '';
+  el('forgot-modal-error').classList.add('hidden');
+  el('forgot-modal-success').classList.add('hidden');
+  el('forgot-btn-submit').disabled = false;
+  el('forgot-btn-submit').querySelector('.btn-text').textContent = 'Kirim Link Reset';
+  el('forgot-btn-submit').querySelector('.spinner')?.classList.add('hidden');
+  el('forgot-password-modal').classList.remove('hidden');
+  el('forgot-modal-email').focus();
+};
+
+window.closeForgotModal = function() {
+  el('forgot-password-modal').classList.add('hidden');
+};
+
+window.submitForgotPassword = async function() {
+  const email = el('forgot-modal-email').value.trim();
+  el('forgot-modal-error').classList.add('hidden');
+  el('forgot-modal-success').classList.add('hidden');
+
+  if (!email) {
+    el('forgot-modal-error').textContent = 'Masukkan alamat email kamu.';
+    el('forgot-modal-error').classList.remove('hidden');
+    return;
+  }
+
+  setLoad('forgot-btn-submit', true);
   try {
-    await apiPost('/api/auth/forgot-password', { email: email.trim() });
-    showToast('Jika email terdaftar, link reset akan dikirim.', 'success');
+    await apiPost('/api/auth/forgot-password', { email });
+    el('forgot-modal-success').classList.remove('hidden');
+    el('forgot-modal-success').textContent = '✅ Jika email terdaftar, link reset password telah dikirim. Cek inbox (dan folder spam) kamu.';
+    el('forgot-btn-submit').disabled = true;
   } catch (err) {
-    showToast('Gagal: ' + err.message, 'error');
+    el('forgot-modal-error').textContent = err.message || 'Gagal mengirim email. Coba lagi.';
+    el('forgot-modal-error').classList.remove('hidden');
+  } finally {
+    setLoad('forgot-btn-submit', false);
+  }
+};
+
+/* Reset Password — halaman /reset-password?token=... */
+async function handleResetPasswordPage() {
+  const params = new URLSearchParams(window.location.search);
+  const token  = params.get('token');
+  if (!window.location.pathname.includes('reset-password') || !token) return;
+
+  // Verifikasi token
+  try {
+    await apiGet(`/api/auth/reset-password?token=${token}`);
+    showResetPasswordForm(token);
+  } catch (err) {
+    showScreen('login-screen');
+    showToast('Link reset password tidak valid atau sudah kedaluwarsa.', 'error');
+  }
+}
+
+function showResetPasswordForm(token) {
+  // Tampilkan screen reset password
+  el('reset-token-hidden').value = token;
+  el('reset-pw-error').classList.add('hidden');
+  showScreen('reset-password-screen');
+}
+
+window.submitResetPassword = async function() {
+  const token   = el('reset-token-hidden').value;
+  const pw      = el('reset-new-password').value;
+  const confirm = el('reset-confirm-password').value;
+  const errEl   = el('reset-pw-error');
+
+  errEl.classList.add('hidden');
+  if (pw.length < 6) { errEl.textContent = 'Password minimal 6 karakter.'; errEl.classList.remove('hidden'); return; }
+  if (pw !== confirm) { errEl.textContent = 'Password tidak cocok.'; errEl.classList.remove('hidden'); return; }
+
+  setLoad('reset-pw-btn', true);
+  try {
+    await apiPost('/api/auth/reset-password', { token, password: pw });
+    showToast('Password berhasil diubah! Silakan login.', 'success');
+    setTimeout(() => showScreen('login-screen'), 1500);
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove('hidden');
+  } finally {
+    setLoad('reset-pw-btn', false);
   }
 };
 
@@ -430,6 +528,10 @@ async function loadMessages(chatId) {
     const msgs = data.messages || [];
     let lastDate = null;
     msgs.forEach(msg => {
+      // Jangan tampilkan sinyal WebRTC sebagai chat bubble
+      let sig; try { sig = JSON.parse(msg.content); } catch {}
+      if (sig?.__rtc__) return;
+
       const d = msg.created_at ? new Date(msg.created_at) : null;
       if (d) {
         const ds = fmtDate(d);
@@ -1064,8 +1166,313 @@ function sendPushNotif(text) {
    MOBILE / MISC
 ════════════════════════════════════════ */
 window.closeChatMobile = function() { el('chat-area').classList.remove('active'); };
-window.startVideoCall  = function() { showToast('📹 Video call segera hadir!'); };
-window.startVoiceCall  = function() { showToast('📞 Voice call segera hadir!'); };
+
+/* ════════════════════════════════════════
+   VOICE / VIDEO CALL — WebRTC
+   Peer-to-peer via browser WebRTC API.
+   Signaling dilakukan via REST polling
+   (agar kompatibel dengan Vercel serverless).
+════════════════════════════════════════ */
+const RTC = {
+  pc:         null,   // RTCPeerConnection
+  localStream: null,
+  callType:   null,   // 'voice' | 'video'
+  isInitiator: false,
+  partnerId:   null,
+  pollTimer:   null,
+  callId:      null
+};
+
+const ICE_SERVERS = {
+  iceServers: [
+    // STUN servers (Google — gratis, tidak perlu config)
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    // TURN servers — Open Relay (gratis, rate-limited, cukup untuk testing)
+    // Untuk produksi dengan banyak user, ganti dengan Metered/Twilio/Coturn sendiri
+    {
+      urls:       'turn:openrelay.metered.ca:80',
+      username:   'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls:       'turn:openrelay.metered.ca:443',
+      username:   'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls:       'turn:openrelay.metered.ca:443?transport=tcp',
+      username:   'openrelayproject',
+      credential: 'openrelayproject'
+    }
+  ]
+};
+
+window.startVoiceCall = async function() { await initiateCall('voice'); };
+window.startVideoCall = async function() { await initiateCall('video'); };
+
+async function initiateCall(type) {
+  if (!currentPartner) return;
+  if (RTC.pc) { showToast('Sudah ada panggilan aktif', 'error'); return; }
+
+  RTC.callType    = type;
+  RTC.isInitiator = true;
+  RTC.partnerId   = currentPartner.id;
+  RTC.callId      = `${currentUser.id}_${Date.now()}`;
+
+  try {
+    const constraints = { audio: true, video: type === 'video' };
+    RTC.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (err) {
+    showToast(`Gagal akses ${type === 'video' ? 'kamera/mikrofon' : 'mikrofon'}: ${err.message}`, 'error');
+    return;
+  }
+
+  showCallUI(type, 'outgoing');
+  setupPeerConnection();
+
+  // Buat offer
+  try {
+    const offer = await RTC.pc.createOffer();
+    await RTC.pc.setLocalDescription(offer);
+
+    // Kirim offer via chat message (signaling channel)
+    await apiPost(`/api/chats/${currentChatId}/messages`, {
+      type:    'text',
+      content: JSON.stringify({ __rtc__: true, action: 'offer', callId: RTC.callId,
+                                callType: type, sdp: offer.sdp })
+    });
+
+    // Poll untuk answer
+    startSignalingPoll();
+  } catch (err) {
+    showToast('Gagal memulai panggilan: ' + err.message, 'error');
+    endCall();
+  }
+}
+
+function setupPeerConnection() {
+  RTC.pc = new RTCPeerConnection(ICE_SERVERS);
+
+  // Tambahkan track lokal
+  RTC.localStream.getTracks().forEach(track => RTC.pc.addTrack(track, RTC.localStream));
+
+  // Tampilkan video lokal
+  const localVideo = el('call-local-video');
+  if (localVideo) localVideo.srcObject = RTC.localStream;
+
+  // Terima track dari partner
+  RTC.pc.ontrack = (event) => {
+    const remoteVideo = el('call-remote-video');
+    const remoteAudio = el('call-remote-audio');
+    if (!remoteVideo && !remoteAudio) return;
+    const stream = event.streams[0];
+    if (remoteVideo) remoteVideo.srcObject = stream;
+    if (remoteAudio) remoteAudio.srcObject = stream;
+  };
+
+  // ICE candidate — kirim via signaling
+  RTC.pc.onicecandidate = async (event) => {
+    if (!event.candidate || !currentChatId) return;
+    try {
+      await apiPost(`/api/chats/${currentChatId}/messages`, {
+        type:    'text',
+        content: JSON.stringify({ __rtc__: true, action: 'ice', callId: RTC.callId,
+                                  candidate: event.candidate })
+      });
+    } catch {}
+  };
+
+  RTC.pc.onconnectionstatechange = () => {
+    const state = RTC.pc?.connectionState;
+    console.log('WebRTC state:', state);
+    if (state === 'connected') {
+      el('call-status')?.textContent && (el('call-status').textContent = 'Tersambung');
+      startCallTimer();
+    }
+    if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+      endCall();
+    }
+  };
+}
+
+/* Proses pesan signaling yang diterima */
+async function processRtcSignal(msg) {
+  let sig;
+  try { sig = JSON.parse(msg.content); } catch { return false; }
+  if (!sig?.__rtc__) return false;
+  if (sig.callId && RTC.callId && sig.callId !== RTC.callId) return true; // bukan call ini
+
+  if (sig.action === 'offer' && !RTC.isInitiator) {
+    // Terima panggilan masuk
+    RTC.callId   = sig.callId;
+    RTC.callType = sig.callType || 'voice';
+    RTC.partnerId = currentPartner?.id || null;
+    showIncomingCallUI(sig);
+    return true;
+  }
+
+  if (sig.action === 'answer' && RTC.isInitiator && RTC.pc) {
+    await RTC.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sig.sdp }));
+    return true;
+  }
+
+  if (sig.action === 'ice' && RTC.pc) {
+    await RTC.pc.addIceCandidate(new RTCIceCandidate(sig.candidate)).catch(() => {});
+    return true;
+  }
+
+  if (sig.action === 'end') {
+    endCall(false);
+    showToast(`${currentPartner?.name || 'Partner'} mengakhiri panggilan`, 'info');
+    return true;
+  }
+
+  if (sig.action === 'reject') {
+    endCall(false);
+    showToast('Panggilan ditolak', 'error');
+    return true;
+  }
+
+  return true;
+}
+
+window.acceptCall = async function() {
+  if (!RTC.pendingOffer) return;
+  const sig = RTC.pendingOffer;
+
+  try {
+    const constraints = { audio: true, video: sig.callType === 'video' };
+    RTC.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (err) {
+    showToast('Gagal akses perangkat: ' + err.message, 'error');
+    rejectCall();
+    return;
+  }
+
+  el('incoming-call-modal')?.classList.add('hidden');
+  showCallUI(sig.callType, 'incoming');
+  setupPeerConnection();
+
+  // Set remote offer dan buat answer
+  await RTC.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: sig.sdp }));
+  const answer = await RTC.pc.createAnswer();
+  await RTC.pc.setLocalDescription(answer);
+
+  await apiPost(`/api/chats/${currentChatId}/messages`, {
+    type:    'text',
+    content: JSON.stringify({ __rtc__: true, action: 'answer', callId: RTC.callId, sdp: answer.sdp })
+  });
+
+  startSignalingPoll();
+  RTC.pendingOffer = null;
+};
+
+window.rejectCall = async function() {
+  if (currentChatId) {
+    await apiPost(`/api/chats/${currentChatId}/messages`, {
+      type: 'text', content: JSON.stringify({ __rtc__: true, action: 'reject', callId: RTC.callId })
+    }).catch(() => {});
+  }
+  el('incoming-call-modal')?.classList.add('hidden');
+  RTC.pendingOffer = null;
+};
+
+window.endCall = function(notify = true) {
+  clearInterval(RTC.pollTimer);
+  clearInterval(RTC._callTimer);
+  RTC.pollTimer = null;
+
+  if (notify && currentChatId) {
+    apiPost(`/api/chats/${currentChatId}/messages`, {
+      type: 'text', content: JSON.stringify({ __rtc__: true, action: 'end', callId: RTC.callId })
+    }).catch(() => {});
+  }
+
+  if (RTC.localStream) {
+    RTC.localStream.getTracks().forEach(t => t.stop());
+    RTC.localStream = null;
+  }
+  if (RTC.pc) { RTC.pc.close(); RTC.pc = null; }
+
+  el('call-modal')?.classList.add('hidden');
+  el('incoming-call-modal')?.classList.add('hidden');
+
+  RTC.callId = RTC.callType = RTC.partnerId = null;
+  RTC.isInitiator = false;
+};
+
+window.toggleMic = function() {
+  if (!RTC.localStream) return;
+  const track   = RTC.localStream.getAudioTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  el('btn-toggle-mic').textContent = track.enabled ? '🎤' : '🔇';
+};
+
+window.toggleCamera = function() {
+  if (!RTC.localStream) return;
+  const track   = RTC.localStream.getVideoTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  el('btn-toggle-cam').textContent = track.enabled ? '📷' : '📷🚫';
+};
+
+function startSignalingPoll() {
+  clearInterval(RTC.pollTimer);
+  let lastSignalTime = new Date().toISOString();
+  RTC.pollTimer = setInterval(async () => {
+    if (!currentChatId || !RTC.pc) { clearInterval(RTC.pollTimer); return; }
+    try {
+      const qs   = `?after=${encodeURIComponent(lastSignalTime)}`;
+      const data = await apiGet(`/api/chats/${currentChatId}/messages${qs}`);
+      for (const msg of (data.messages || [])) {
+        if (new Date(msg.created_at) > new Date(lastSignalTime))
+          lastSignalTime = msg.created_at;
+        if (msg.sender_id !== currentUser.id) {
+          await processRtcSignal(msg);
+        }
+      }
+    } catch {}
+  }, 1000);
+}
+
+let _callSeconds = 0;
+function startCallTimer() {
+  _callSeconds = 0;
+  clearInterval(RTC._callTimer);
+  RTC._callTimer = setInterval(() => {
+    _callSeconds++;
+    const m = String(Math.floor(_callSeconds/60)).padStart(2,'0');
+    const s = String(_callSeconds%60).padStart(2,'0');
+    const el2 = el('call-timer');
+    if (el2) el2.textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function showCallUI(type, direction) {
+  const modal = el('call-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  el('call-modal-title').textContent = type === 'video' ? '📹 Video Call' : '📞 Voice Call';
+  el('call-partner-name').textContent = currentPartner?.name || 'Partner';
+  el('call-status').textContent = direction === 'outgoing' ? 'Menghubungi…' : 'Menerima…';
+  el('call-timer').textContent = '00:00';
+  el('call-local-video').style.display    = type === 'video' ? '' : 'none';
+  el('call-remote-video').style.display   = type === 'video' ? '' : 'none';
+  el('btn-toggle-cam').style.display      = type === 'video' ? '' : 'none';
+  el('call-partner-avatar').src = currentPartner?.photo_url || 'assets/default-avatar.svg';
+}
+
+function showIncomingCallUI(sig) {
+  RTC.pendingOffer = sig;
+  const modal = el('incoming-call-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  el('incoming-caller-name').textContent = currentPartner?.name || 'Seseorang';
+  el('incoming-call-type').textContent = sig.callType === 'video' ? '📹 Video Call' : '📞 Voice Call';
+  el('incoming-caller-avatar').src = currentPartner?.photo_url || 'assets/default-avatar.svg';
+}
 
 window.openLightbox = function(src, name) {
   el('lightbox-img').src    = src;
