@@ -24,6 +24,9 @@ const USE_CLOUDINARY = !!(
   !process.env.CLOUDINARY_CLOUD_NAME.includes('your_cloud_name')
 );
 
+/* Vercel/Lambda: filesystem read-only, tidak bisa mkdir */
+const IS_SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NETLIFY);
+
 const BLOCKED_EXT  = ['.exe','.bat','.sh','.cmd','.ps1','.js','.php','.py','.rb','.pl'];
 const MAX_MB       = parseInt(process.env.MAX_FILE_SIZE_MB || '50');
 
@@ -125,14 +128,16 @@ function buildCloudinaryRoutes(router) {
 function buildLocalRoutes(router) {
   const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || 'uploads');
 
-  ['chat', 'avatars'].forEach(sub => {
+  /* Buat direktori secara lazy (saat pertama kali dibutuhkan, bukan saat startup) */
+  function ensureDir(sub) {
     const dir = path.join(UPLOAD_DIR, sub);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  });
+    return dir;
+  }
 
   function makeStorage(subdir) {
     return multer.diskStorage({
-      destination: (req, file, cb) => cb(null, path.join(UPLOAD_DIR, subdir)),
+      destination: (req, file, cb) => cb(null, ensureDir(subdir)),
       filename:    (req, file, cb) => cb(null, `${Date.now()}_${uuid()}${path.extname(file.originalname).toLowerCase()}`)
     });
   }
@@ -178,6 +183,15 @@ function buildLocalRoutes(router) {
 /* ─── Init ──────────────────────────────── */
 if (USE_CLOUDINARY) {
   buildCloudinaryRoutes(router);
+} else if (IS_SERVERLESS) {
+  /* Vercel tanpa Cloudinary — kembalikan error yang jelas */
+  console.warn('⚠️  Upload mode: DISABLED (serverless tanpa Cloudinary). Isi CLOUDINARY_* di env vars.');
+  router.post('/file',   auth, (req, res) => res.status(501).json({
+    error: 'Upload tidak tersedia. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET di Vercel Environment Variables.'
+  }));
+  router.post('/avatar', auth, (req, res) => res.status(501).json({
+    error: 'Upload tidak tersedia. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET di Vercel Environment Variables.'
+  }));
 } else {
   buildLocalRoutes(router);
 }
