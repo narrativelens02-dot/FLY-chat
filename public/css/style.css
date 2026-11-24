@@ -2287,3 +2287,235 @@ body {
   .call-avatar     { width: 64px; height: 64px; }
   .call-partner-name { font-size: 1rem; }
 }
+
+/* ============================================================
+   FLYchat — New Components: Call Logs, Groups, Nav, Emoji
+   ============================================================ */
+
+/* ── Bottom Taskbar ── */
+.bottom-taskbar {
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  padding: 6px 4px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-sidebar);
+  flex-shrink: 0;
+}
+.taskbar-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-m);
+  font-size: .68rem;
+  font-weight: 500;
+  transition: background .15s, color .15s;
+  min-width: 48px;
+}
+.taskbar-item:hover { background: var(--primary-muted); color: var(--primary); }
+.taskbar-item.active { color: var(--primary); }
+.taskbar-item.active .taskbar-icon svg { stroke: var(--primary); }
+.taskbar-icon { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; }
+.taskbar-label { font-size: .62rem; }
+.add-btn-highlight { background: var(--primary-muted); border-radius: 50%; }
+.nav-avatar-img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; border: 2px solid var(--primary); }
+
+/* ── Section containers ── */
+.nav-section-container { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.nav-section-container.hidden { display: none !important; }
+.section-sub-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 6px;
+  flex-shrink: 0;
+}
+.section-title { font-size: .85rem; font-weight: 700; color: var(--text-h); }
+.clear-logs-btn, .create-group-btn {
+  font-size: .75rem;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-m);
+  cursor: pointer;
+  transition: background .15s;
+}
+.clear-logs-btn:hover { background: #fef2f2; color: #ef4444; }
+.create-group-btn { background: var(--primary); color: white; border-color: var(--primary); }
+.create-group-btn:hover { background: var(--primary-dark); }
+
+/* ── Call Log item ── */
+.call-log-item { cursor: pointer; }
+.call-log-item:hover { background: var(--primary-muted); }
+
+/* ── Group Avatar Circle ── */
+.group-avatar-circle {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), var(--primary-light));
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: .85rem;
+  flex-shrink: 0;
+}
+
+/* ── Group contacts picker ── */
+.group-contacts-picker .group-member-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: .88rem;
+  transition: background .15s;
+}
+.group-contacts-picker .group-member-pick:hover { background: var(--primary-muted); }
+.group-contacts-picker .group-member-pick input[type=checkbox] {
+  accent-color: var(--primary);
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+.group-action-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-m);
+  font-size: 1.1rem;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.group-action-btn:hover { background: var(--primary-muted); color: var(--primary); }
+
+/* ── Modal input style ── */
+.modal-input {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-h);
+  font-size: .9rem;
+  outline: none;
+  transition: border-color .2s;
+}
+.modal-input:focus { border-color: var(--primary); }
+
+/* ── Emoji Picker — Google Noto style ── */
+.emoji-picker {
+  position: absolute;
+  bottom: 72px;
+  right: 56px;
+  width: 320px;
+  max-height: 380px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 1000;
+}
+.emoji-picker.hidden { display: none; }
+.emoji-picker-header { padding: 10px 12px 4px; border-bottom: 1px solid var(--border); }
+.emoji-picker-title { font-size: .78rem; font-weight: 600; color: var(--text-m); }
+.emoji-search-box { padding: 6px 10px; }
+.emoji-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: .85rem;
+  background: var(--bg-input);
+  color: var(--text-h);
+  outline: none;
+}
+.emoji-search-input:focus { border-color: var(--primary); }
+.emoji-tabs {
+  display: flex;
+  overflow-x: auto;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+.emoji-tabs::-webkit-scrollbar { display: none; }
+.emoji-tab-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s;
+}
+.emoji-tab-btn:hover, .emoji-tab-btn.active { background: var(--primary-muted); }
+.emoji-scroll-area { flex: 1; overflow-y: auto; padding: 4px 6px 8px; }
+.emoji-cat-title { font-size: .72rem; font-weight: 600; color: var(--text-m); padding: 8px 4px 4px; }
+.emoji-grid { display: flex; flex-wrap: wrap; gap: 1px; }
+.emoji-btn-item {
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .1s, transform .1s;
+  font-family: 'Noto Color Emoji', sans-serif;
+}
+.emoji-btn-item:hover { background: var(--primary-muted); transform: scale(1.2); }
+
+/* ── FLYchat Brand in sidebar ── */
+.flychat-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 10px;
+  transition: background .15s;
+  flex: 1;
+}
+.flychat-brand:hover { background: var(--primary-muted); }
+.flychat-logo-circle {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--primary), var(--primary-light));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.flychat-brand-info { display: flex; flex-direction: column; }
+.flychat-brand-name { font-size: .95rem; font-weight: 700; color: var(--text-h); }
+.flychat-brand-tagline { font-size: .68rem; color: var(--text-m); }
+
+/* ── Responsive adjustments ── */
+@media (max-width: 480px) {
+  .emoji-picker { width: calc(100vw - 32px); right: 8px; }
+  .bottom-taskbar { padding: 4px 2px 10px; }
+  .taskbar-item { min-width: 42px; padding: 5px 6px; }
+}

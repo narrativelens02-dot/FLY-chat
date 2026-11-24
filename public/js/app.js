@@ -104,10 +104,13 @@ function bootApp() {
   startPolling();
   loadSidebarProfile();
   loadChats();
-  loadCallLogs();
-  loadGroups();
   registerServiceWorker();
   showScreen('home-screen');
+  // Update nav avatar
+  if (currentUser?.photo_url) {
+    const navAv = el('nav-user-avatar');
+    if (navAv) navAv.src = currentUser.photo_url;
+  }
 }
 
 /* ════════════════════════════════════════
@@ -2146,3 +2149,315 @@ function normalizeUser(u) {
     online:      u.online !== false
   };
 }
+
+/* ════════════════════════════════════════
+   NAVIGATION — Bottom Taskbar
+════════════════════════════════════════ */
+window.switchNavSection = function(section, btn) {
+  // Update active button
+  document.querySelectorAll('.taskbar-item').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+
+  // Hide all sections
+  ['section-chats', 'section-calls', 'section-groups'].forEach(id => {
+    el(id)?.classList.add('hidden');
+  });
+
+  // Show target section
+  if (section === 'home')   { el('section-chats')?.classList.remove('hidden'); }
+  if (section === 'calls')  { el('section-calls')?.classList.remove('hidden'); loadCallLogs(); }
+  if (section === 'groups') { el('section-groups')?.classList.remove('hidden'); loadGroups(); }
+
+  // Update nav avatar
+  if (currentUser?.photo_url) {
+    const navAv = el('nav-user-avatar');
+    if (navAv) navAv.src = currentUser.photo_url;
+  }
+};
+
+window.triggerNavAddContact = function() {
+  showAddContact();
+};
+
+window.triggerNavProfile = function() {
+  showScreen('profile-screen');
+};
+
+/* ════════════════════════════════════════
+   UNIVERSAL SEARCH
+════════════════════════════════════════ */
+window.handleUniversalSearch = function(q) {
+  const query = q.toLowerCase().trim();
+  // Cari di chat list (nama partner atau preview pesan)
+  document.querySelectorAll('.chat-item').forEach(item => {
+    const name    = item.querySelector('.chat-item-name')?.textContent?.toLowerCase() || '';
+    const preview = item.querySelector('.chat-item-preview')?.textContent?.toLowerCase() || '';
+    item.style.display = (!query || name.includes(query) || preview.includes(query)) ? '' : 'none';
+  });
+};
+
+/* ════════════════════════════════════════
+   CALL LOGS — Riwayat Panggilan
+   Disimpan di localStorage (tidak perlu DB)
+════════════════════════════════════════ */
+const CALL_LOGS_KEY = 'fc_call_logs';
+
+function saveCallLog(entry) {
+  const logs = getCallLogs();
+  logs.unshift(entry); // terbaru di atas
+  if (logs.length > 100) logs.splice(100); // max 100 entri
+  try { localStorage.setItem(CALL_LOGS_KEY, JSON.stringify(logs)); } catch {}
+}
+
+function getCallLogs() {
+  try { return JSON.parse(localStorage.getItem(CALL_LOGS_KEY) || '[]'); } catch { return []; }
+}
+
+function loadCallLogs() {
+  const list = el('calls-list');
+  if (!list) return;
+  const logs = getCallLogs();
+
+  if (!logs.length) {
+    list.innerHTML = '<div class="empty-list-msg">Belum ada riwayat panggilan</div>';
+    return;
+  }
+
+  list.innerHTML = '';
+  logs.forEach(log => {
+    const div = document.createElement('div');
+    div.className = 'chat-item call-log-item';
+
+    const isOut     = log.direction === 'outgoing';
+    const isMissed  = log.status === 'missed';
+    const icon      = log.type === 'video' ? '📹' : '📞';
+    const dirIcon   = isMissed ? '📵' : (isOut ? '↗' : '↙');
+    const dirColor  = isMissed ? '#ef4444' : (isOut ? '#7d2535' : '#22c55e');
+    const timeStr   = log.time ? fmtTime(new Date(log.time)) : '';
+    const durationStr = log.duration ? fmtCallDuration(log.duration) : (isMissed ? 'Tidak terjawab' : '');
+
+    div.innerHTML = `
+      <div class="avatar-container">
+        <img src="${esc(log.photo_url || 'assets/default-avatar.svg')}" alt="" class="avatar-sm"/>
+      </div>
+      <div class="chat-item-info">
+        <div class="chat-item-name">${esc(log.name || 'Pengguna')}</div>
+        <div class="chat-item-preview" style="color:${dirColor}">
+          ${dirIcon} ${icon} ${durationStr}
+        </div>
+      </div>
+      <div class="chat-item-meta">
+        <span class="chat-item-time">${timeStr}</span>
+      </div>
+    `;
+
+    // Klik untuk call ulang
+    div.addEventListener('click', async () => {
+      if (!log.partner_id) return;
+      try {
+        const data = await apiGet(`/api/users/${log.partner_id}`);
+        const partner = data.user;
+        const chatData = await apiPost('/api/chats', { partner_id: partner.id });
+        await openChat(chatData.chat_id, partner);
+        if (log.type === 'video') startVideoCall();
+        else startVoiceCall();
+      } catch (err) {
+        showToast('Gagal menghubungi: ' + err.message, 'error');
+      }
+    });
+
+    list.appendChild(div);
+  });
+}
+
+function fmtCallDuration(seconds) {
+  if (!seconds || seconds < 1) return '';
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+window.clearCallLogs = function() {
+  if (!confirm('Hapus semua riwayat panggilan?')) return;
+  localStorage.removeItem(CALL_LOGS_KEY);
+  loadCallLogs();
+  showToast('Riwayat panggilan dihapus');
+};
+
+// Hook ke endCall untuk menyimpan log
+const _origEndCall = window.endCall;
+window.endCall = function(notify = true) {
+  // Simpan log sebelum state di-reset
+  if (RTC.callId && (RTC.partnerId || RTC.partner)) {
+    const duration = typeof _callSeconds !== 'undefined' ? _callSeconds : 0;
+    const isConnected = RTC.pc?.connectionState === 'connected';
+    saveCallLog({
+      call_id:    RTC.callId,
+      partner_id: RTC.partnerId || RTC.partner?.id,
+      name:       RTC.partner?.name || currentPartner?.name || 'Pengguna',
+      photo_url:  RTC.partner?.photo_url || currentPartner?.photo_url || '',
+      type:       RTC.callType || 'voice',
+      direction:  RTC.isInitiator ? 'outgoing' : 'incoming',
+      status:     isConnected ? 'answered' : (RTC.isInitiator ? 'no-answer' : 'missed'),
+      duration:   isConnected ? duration : 0,
+      time:       new Date().toISOString()
+    });
+  }
+  _origEndCall(notify);
+};
+
+/* ════════════════════════════════════════
+   GRUP / KELOMPOK
+   Disimpan di localStorage sebagai MVP
+   (tanpa backend DB khusus grup)
+════════════════════════════════════════ */
+const GROUPS_KEY = 'fc_groups';
+
+function getGroups() {
+  try { return JSON.parse(localStorage.getItem(GROUPS_KEY) || '[]'); } catch { return []; }
+}
+
+function saveGroups(groups) {
+  try { localStorage.setItem(GROUPS_KEY, JSON.stringify(groups)); } catch {}
+}
+
+function loadGroups() {
+  const list = el('groups-list');
+  if (!list) return;
+  const groups = getGroups();
+
+  if (!groups.length) {
+    list.innerHTML = `
+      <div class="empty-list-msg">
+        Belum ada grup. Klik <strong>+ Buat Grup</strong> untuk memulai.
+      </div>`;
+    return;
+  }
+
+  list.innerHTML = '';
+  groups.forEach(group => {
+    const div = document.createElement('div');
+    div.className = 'chat-item group-item';
+    const memberCount = (group.members || []).length;
+    const initials = (group.name || 'G').slice(0, 2).toUpperCase();
+
+    div.innerHTML = `
+      <div class="avatar-container">
+        <div class="group-avatar-circle">${esc(initials)}</div>
+      </div>
+      <div class="chat-item-info">
+        <div class="chat-item-name">${esc(group.name)}</div>
+        <div class="chat-item-preview">${memberCount} anggota${group.desc ? ' · ' + esc(group.desc) : ''}</div>
+      </div>
+      <div class="chat-item-meta">
+        <button class="group-action-btn" onclick="openGroupDetail('${esc(group.id)}')" title="Detail grup">···</button>
+      </div>
+    `;
+    list.appendChild(div);
+  });
+}
+
+window.openCreateGroupModal = function() {
+  el('group-name-input').value = '';
+  el('group-desc-input').value = '';
+
+  // Isi picker kontak
+  const picker = el('group-contacts-picker');
+  picker.innerHTML = '<div style="font-size:.82rem;color:var(--text-m);padding:4px">Memuat kontak...</div>';
+
+  apiGet('/api/users/me/contacts').then(data => {
+    const contacts = data.contacts || [];
+    if (!contacts.length) {
+      picker.innerHTML = '<div style="font-size:.82rem;color:var(--text-m);padding:4px">Belum ada kontak. Tambah kontak terlebih dahulu.</div>';
+      return;
+    }
+    picker.innerHTML = '';
+    contacts.forEach(u => {
+      const label = document.createElement('label');
+      label.className = 'group-member-pick';
+      label.innerHTML = `
+        <input type="checkbox" value="${u.id}" data-name="${esc(u.name)}" />
+        <img src="${esc(u.photo_url || 'assets/default-avatar.svg')}" class="avatar-sm" alt="" />
+        <span>${esc(u.name)}</span>
+      `;
+      picker.appendChild(label);
+    });
+  }).catch(() => {
+    picker.innerHTML = '<div style="font-size:.82rem;color:var(--text-m);padding:4px">Gagal memuat kontak</div>';
+  });
+
+  el('create-group-modal').classList.remove('hidden');
+  el('group-name-input').focus();
+};
+
+window.submitCreateGroup = function() {
+  const name = el('group-name-input').value.trim();
+  if (!name) { showToast('Nama grup wajib diisi', 'error'); return; }
+
+  const checkedBoxes = el('group-contacts-picker').querySelectorAll('input[type=checkbox]:checked');
+  const members = Array.from(checkedBoxes).map(cb => ({
+    id:   cb.value,
+    name: cb.dataset.name
+  }));
+
+  if (members.length < 1) { showToast('Pilih minimal 1 anggota', 'error'); return; }
+
+  // Tambahkan diri sendiri sebagai admin
+  const group = {
+    id:        `grp_${Date.now()}`,
+    name,
+    desc:      el('group-desc-input').value.trim(),
+    admin_id:  currentUser.id,
+    members:   [{ id: currentUser.id, name: currentUser.name, role: 'admin' }, ...members.map(m => ({ ...m, role: 'member' }))],
+    created_at: new Date().toISOString()
+  };
+
+  const groups = getGroups();
+  groups.unshift(group);
+  saveGroups(groups);
+
+  closeModal('create-group-modal');
+  showToast(`Grup "${name}" berhasil dibuat! 🎉`, 'success');
+  loadGroups();
+
+  // Pindah ke tab grup
+  const groupsBtn = el('nav-item-groups');
+  if (groupsBtn) switchNavSection('groups', groupsBtn);
+};
+
+window.openGroupDetail = function(groupId) {
+  const groups = getGroups();
+  const group  = groups.find(g => g.id === groupId);
+  if (!group) return;
+
+  const isAdmin = group.admin_id === currentUser?.id;
+  const memberList = (group.members || []).map(m => `
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+      <img src="assets/default-avatar.svg" class="avatar-sm" alt=""/>
+      <span style="flex:1;font-size:.9rem">${esc(m.name)}</span>
+      <span style="font-size:.75rem;color:var(--text-m);background:var(--bg-app);padding:2px 8px;border-radius:12px">${m.role === 'admin' ? '👑 Admin' : 'Anggota'}</span>
+    </div>`).join('');
+
+  const content = el('partner-profile-content');
+  content.innerHTML = `
+    <div style="text-align:center;padding:8px 0 16px">
+      <div class="group-avatar-circle" style="width:72px;height:72px;font-size:1.6rem;margin:0 auto 10px">${esc((group.name||'G').slice(0,2).toUpperCase())}</div>
+      <div style="font-size:1.1rem;font-weight:700">${esc(group.name)}</div>
+      ${group.desc ? `<div style="font-size:.85rem;color:var(--text-m);margin-top:4px">${esc(group.desc)}</div>` : ''}
+      <div style="font-size:.8rem;color:var(--text-light);margin-top:4px">${(group.members||[]).length} anggota · Dibuat ${fmtDate(new Date(group.created_at))}</div>
+    </div>
+    <div style="text-align:left;max-height:200px;overflow-y:auto">${memberList}</div>
+    ${isAdmin ? `<button class="btn-danger" style="width:100%;margin-top:12px;padding:9px" onclick="deleteGroup('${esc(groupId)}')">🗑 Hapus Grup</button>` : ''}
+    <button class="btn-primary" style="width:auto;padding:9px 24px;margin-top:8px" onclick="closeModal('partner-profile-modal')">Tutup</button>
+  `;
+  el('partner-profile-modal').classList.remove('hidden');
+};
+
+window.deleteGroup = function(groupId) {
+  if (!confirm('Hapus grup ini?')) return;
+  const groups = getGroups().filter(g => g.id !== groupId);
+  saveGroups(groups);
+  closeModal('partner-profile-modal');
+  loadGroups();
+  showToast('Grup dihapus');
+};
