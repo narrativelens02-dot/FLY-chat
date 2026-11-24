@@ -186,38 +186,39 @@ Keamanan: Backend sekarang **memverifikasi signature** token Google via `google-
 
 ---
 
-### 2. Forgot Password / Reset Password (SMTP Email)
+### 2. Forgot Password / Reset Password (Email)
 
-**Opsi A — Gmail (Rekomendasi)**
+Mailer auto-detect mode berdasarkan env vars yang diisi:
+
+**Mode 1 — Resend (Rekomendasi, gratis 3000/bulan)**
+1. Daftar di https://resend.com (gratis)
+2. API Keys → Create API Key
+3. Isi `.env`:
+```
+RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx
+FRONTEND_URL=https://url-produksi-kamu.vercel.app
+```
+
+**Mode 2 — Gmail App Password**
 1. Aktifkan 2FA di akun Google
 2. Buka https://myaccount.google.com/apppasswords
-3. Buat App Password untuk "Mail" / "Other (Custom name)"
+3. Buat App Password untuk "Mail"
 4. Isi `.env`:
 ```
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_SECURE=false
 SMTP_USER=emailkamu@gmail.com
-SMTP_PASS=xxxx xxxx xxxx xxxx   ← app password 16 karakter
+SMTP_PASS=xxxx xxxx xxxx xxxx
 EMAIL_FROM=FLYchat <emailkamu@gmail.com>
-FRONTEND_URL=http://localhost:3000
+FRONTEND_URL=https://url-produksi-kamu.vercel.app
 ```
 
-**Opsi B — Mailtrap (testing lokal, gratis)**
-1. Buat akun di https://mailtrap.io
-2. Sandbox → pilih inbox → pilih SMTP credentials
-```
-SMTP_HOST=sandbox.smtp.mailtrap.io
-SMTP_PORT=2525
-SMTP_USER=your_mailtrap_user
-SMTP_PASS=your_mailtrap_pass
-```
+**Mode 3 — Console (Development, default)**
 
-Flow reset password:
-- User klik "Lupa password?" → isi email → dapat link di email
-- Link: `http://localhost:3000/reset-password?token=UUID`
-- Token valid **1 jam**, sekali pakai
-- Backend verifikasi token → update password di DB
+Tanpa config di atas, link reset dicetak ke console server. Cocok untuk development lokal — buka terminal server dan salin link dari log.
+
+Cek mode aktif: `GET /api/auth/mailer-status`
 
 ---
 

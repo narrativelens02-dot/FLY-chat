@@ -5,6 +5,7 @@ const jwt     = require('jsonwebtoken');
 const { v4: uuid } = require('uuid');
 const { sql } = require('../db');
 const { sendMail, resetPasswordTemplate } = require('../mailer');
+const { getMailerStatus } = require('../mailer');
 
 const sign = (user) => jwt.sign(
   { id: user.id, email: user.email, name: user.name },
@@ -169,6 +170,11 @@ router.post('/logout', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
+/* ── Mailer status (untuk info/debugging) ── */
+router.get('/mailer-status', (req, res) => {
+  res.json(getMailerStatus());
+});
+
 /* ── Forgot Password — kirim email dengan link reset ── */
 router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
@@ -186,8 +192,8 @@ router.post('/forgot-password', async (req, res) => {
     await sql`DELETE FROM password_resets WHERE user_id = ${user.id} AND used = FALSE`;
 
     // Buat token reset (berlaku 1 jam)
-    const tokenId  = uuid();
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // +1 jam
+    const tokenId   = uuid();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
     await sql`
       INSERT INTO password_resets (id, user_id, expires_at)
       VALUES (${tokenId}, ${user.id}, ${expiresAt.toISOString()})
@@ -196,6 +202,7 @@ router.post('/forgot-password', async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     const resetLink   = `${frontendUrl}/reset-password?token=${tokenId}`;
 
+    // sendMail auto-fallback ke console jika SMTP/Resend belum dikonfigurasi
     await sendMail(
       user.email,
       '🔑 Reset Password FLYchat',
@@ -205,11 +212,7 @@ router.post('/forgot-password', async (req, res) => {
     res.json({ message: 'Jika email terdaftar, link reset akan dikirim.' });
   } catch (err) {
     console.error('forgot-password error:', err.message);
-    // Jangan expose error detail SMTP ke client
-    if (err.message.includes('SMTP')) {
-      return res.status(503).json({ error: 'Layanan email sedang tidak tersedia. Coba lagi nanti.' });
-    }
-    res.status(500).json({ error: 'Gagal mengirim email' });
+    res.status(500).json({ error: 'Gagal memproses permintaan reset password.' });
   }
 });
 
