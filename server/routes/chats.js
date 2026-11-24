@@ -78,6 +78,54 @@ router.post('/', auth, async (req, res) => {
   res.status(201).json({ chat_id: chatId, created: true });
 });
 
+/* ── Check for incoming call signals for current user (HTTP polling fallback) ── */
+router.get('/rtc/incoming', auth, async (req, res) => {
+  const cutoff = Date.now() - 35_000;
+  const recent = rtcStore.filter(s =>
+    s.target_id === req.user.id &&
+    new Date(s.created_at).getTime() > cutoff
+  );
+
+  let activeOffer = null;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(recent[i].content);
+      if (parsed?.__rtc__ && parsed.action === 'offer') {
+        const isCancelled = recent.some(p => {
+          try {
+            const pSig = JSON.parse(p.content);
+            return pSig.callId === parsed.callId && (pSig.action === 'end' || pSig.action === 'reject');
+          } catch { return false; }
+        });
+        if (!isCancelled) {
+          activeOffer = {
+            chat_id:    recent[i].chat_id,
+            sender_id:  recent[i].sender_id,
+            signal:     parsed,
+            created_at: recent[i].created_at
+          };
+          break;
+        }
+      }
+    } catch {}
+  }
+  res.json({ incoming: activeOffer });
+});
+
+/* ── Dedicated fast in-memory RTC signal polling for a chat ── */
+router.get('/:id/rtc', auth, async (req, res) => {
+  const c = await assertParticipant(req.params.id, req.user.id, res);
+  if (!c) return;
+
+  const since = req.query.since || req.query.after;
+  let signals = rtcStore.filter(s => s.chat_id === req.params.id && s.sender_id !== req.user.id);
+  if (since) {
+    const sinceTime = new Date(since).getTime();
+    signals = signals.filter(s => new Date(s.created_at).getTime() > sinceTime);
+  }
+  res.json({ signals });
+});
+
 /* ── Mark chat as read ── */
 router.patch('/:id/read', auth, async (req, res) => {
   const c = await assertParticipant(req.params.id, req.user.id, res);
@@ -188,10 +236,13 @@ router.post('/:id/messages', auth, async (req, res) => {
     let sig;
     try { sig = JSON.parse(content); } catch {}
     if (sig?.__rtc__ === true) {
+      // Deteksi user tujuan
+      const targetId = c.participant1_id === req.user.id ? c.participant2_id : c.participant1_id;
       // Simpan ke in-memory store dengan TTL 60 detik
       rtcStore.push({
         chat_id:    req.params.id,
         sender_id:  req.user.id,
+        target_id:  targetId,
         content,
         created_at: new Date().toISOString()
       });

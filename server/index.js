@@ -126,6 +126,9 @@ io.on('connection', async (socket) => {
 
   console.log(`🔌 ${socket.user.name} connected (${socket.id})`);
 
+  /* Join personal room untuk notifikasi & direct WebRTC calls */
+  socket.join(`user:${userId}`);
+
   /* ── Join chat room ── */
   socket.on('chat:join', (chatId) => {
     socket.join(`chat:${chatId}`);
@@ -162,6 +165,37 @@ io.on('connection', async (socket) => {
   /* ── Reaction added ── */
   socket.on('message:reacted', ({ chatId, msgId, userId: uid, emoji }) => {
     socket.to(`chat:${chatId}`).emit('message:reacted', { chatId, msgId, userId: uid, emoji });
+  });
+
+  /* ── WebRTC Calling Events (Voice & Video) ── */
+  socket.on('call:invite', (data) => {
+    if (data?.targetUserId) {
+      socket.to(`user:${data.targetUserId}`).emit('call:incoming', {
+        ...data,
+        caller: data.caller || { id: socket.user.id, name: socket.user.name, photo_url: socket.user.photo_url }
+      });
+    }
+  });
+
+  socket.on('call:signal', (data) => {
+    if (data?.targetUserId) {
+      socket.to(`user:${data.targetUserId}`).emit('call:signal', {
+        ...data,
+        senderId: userId
+      });
+    }
+  });
+
+  socket.on('call:reject', (data) => {
+    if (data?.targetUserId) {
+      socket.to(`user:${data.targetUserId}`).emit('call:rejected', data);
+    }
+  });
+
+  socket.on('call:end', (data) => {
+    if (data?.targetUserId) {
+      socket.to(`user:${data.targetUserId}`).emit('call:ended', data);
+    }
   });
 
   /* ── Disconnect ── */

@@ -100,27 +100,187 @@ function setupFormListeners() {
 }
 
 function bootApp() {
+  initSocket();
   startPolling();
   loadSidebarProfile();
   loadChats();
+  loadCallLogs();
+  loadGroups();
   registerServiceWorker();
   showScreen('home-screen');
 }
 
 /* ════════════════════════════════════════
-   POLLING — real-time tanpa Socket.io
-   Vercel Serverless tidak support WebSocket.
-   Polling tiap 2s untuk pesan, 5s untuk chat list.
+   SOCKET.IO & REAL-TIME WEB SOCKET
 ════════════════════════════════════════ */
+let socket = null;
+
+function initSocket() {
+  const token = localStorage.getItem('fc_token');
+  if (!token || typeof io === 'undefined') return;
+  if (socket && socket.connected) return;
+
+  try {
+    const socketUrl = API || window.location.origin;
+    socket = io(socketUrl, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 10
+    });
+
+    socket.on('connect', () => {
+      console.log('🔌 Socket.io connected:', socket.id);
+      if (currentChatId) {
+        socket.emit('chat:join', currentChatId);
+      }
+    });
+
+    socket.on('call:incoming', (data) => {
+      console.log('📞 Panggilan masuk via Socket:', data);
+      handleIncomingCallSignal(data);
+    });
+
+    socket.on('call:signal', (data) => {
+      handleRtcSignalEvent(data);
+    });
+
+    socket.on('call:rejected', (data) => {
+      if (RTC.callId && (!data.callId || data.callId === RTC.callId)) {
+        endCall(false);
+        showToast('Panggilan ditolak oleh partner', 'error');
+      }
+    });
+
+    socket.on('call:ended', (data) => {
+      if (RTC.callId && (!data.callId || data.callId === RTC.callId)) {
+        endCall(false);
+        showToast('Panggilan diakhiri oleh partner', 'info');
+      }
+    });
+
+    socket.on('message:new', ({ chatId, message }) => {
+      if (currentChatId === chatId) {
+        let sig;
+        try { sig = JSON.parse(message.content); } catch {}
+        if (sig?.__rtc__) {
+          processRtcSignal(message);
+          return;
+        }
+        appendMessage(message, false);
+      }
+      loadChats(true);
+    });
+
+    socket.on('user:online', ({ userId, online }) => {
+      if (currentPartner && currentPartner.id === userId) {
+        const dot = el('partner-online-dot');
+        const st  = el('chat-partner-status');
+        if (dot) dot.className = `online-dot ${online ? '' : 'offline'}`;
+        if (st) st.textContent = online ? 'Online' : 'Offline';
+      }
+      loadChats(true);
+    });
+  } catch (err) {
+    console.warn('Socket init error:', err);
+  }
+}
+
+/* ════════════════════════════════════════
+   RINGTONE SYNTHESIZER (Web Audio API)
+════════════════════════════════════════ */
+let ringtoneAudioCtx = null;
+let ringtoneInterval = null;
+
+function playRingtone() {
+  try {
+    stopRingtone();
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    ringtoneAudioCtx = new AudioCtx();
+
+    function beep() {
+      if (!ringtoneAudioCtx || ringtoneAudioCtx.state === 'closed') return;
+      if (ringtoneAudioCtx.state === 'suspended') {
+        ringtoneAudioCtx.resume().catch(() => {});
+      }
+      const now = ringtoneAudioCtx.currentTime;
+      const osc1 = ringtoneAudioCtx.createOscillator();
+      const osc2 = ringtoneAudioCtx.createOscillator();
+      const gain = ringtoneAudioCtx.createGain();
+
+      osc1.type = 'sine';
+      osc2.type = 'sine';
+      osc1.frequency.setValueAtTime(440, now);
+      osc2.frequency.setValueAtTime(480, now);
+
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
+
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(ringtoneAudioCtx.destination);
+
+      osc1.start(now);
+      osc2.start(now);
+      osc1.stop(now + 1.2);
+      osc2.stop(now + 1.2);
+    }
+
+    beep();
+    ringtoneInterval = setInterval(beep, 2800);
+  } catch (e) {
+    console.warn('Ringtone error:', e);
+  }
+}
+
+function stopRingtone() {
+  if (ringtoneInterval) {
+    clearInterval(ringtoneInterval);
+    ringtoneInterval = null;
+  }
+  if (ringtoneAudioCtx) {
+    try { ringtoneAudioCtx.close(); } catch {}
+    ringtoneAudioCtx = null;
+  }
+}
+
+/* ════════════════════════════════════════
+   POLLING & INCOMING CALL CHECK (Fallback)
+════════════════════════════════════════ */
+let pollIncomingCalls = null;
+
 function startPolling() {
   stopPolling();
   pollChats = setInterval(() => loadChats(true), 5000);
+  pollIncomingCalls = setInterval(checkIncomingCallsHttp, 2500);
 }
+
 function stopPolling() {
   clearInterval(pollChats);
   clearInterval(pollMessages);
-  pollChats = pollMessages = null;
+  clearInterval(pollIncomingCalls);
+  pollChats = pollMessages = pollIncomingCalls = null;
 }
+
+async function checkIncomingCallsHttp() {
+  if (RTC.pc || RTC.pendingOffer || !currentUser) return;
+  try {
+    const data = await apiGet('/api/chats/rtc/incoming');
+    if (data?.incoming?.signal && !RTC.pc && !RTC.pendingOffer) {
+      const inc = data.incoming;
+      handleIncomingCallSignal({
+        chatId:       inc.chat_id,
+        senderId:     inc.sender_id,
+        callId:       inc.signal.callId,
+        callType:     inc.signal.callType,
+        sdp:          inc.signal.sdp,
+        caller:       inc.signal.caller,
+        targetUserId: currentUser.id
+      });
+    }
+  } catch {}
+}
+
 function startMessagePolling(chatId) {
   clearInterval(pollMessages);
   pollMessages = setInterval(async () => {
@@ -140,7 +300,7 @@ function startMessagePolling(chatId) {
             await processRtcSignal(msg);
             return; // jangan render sebagai bubble chat
           }
-          appendMessage(msg);
+          appendMessage(msg, false);
           sendPushNotif(msg.content || `[${msg.type}]`);
           incrementUnread(chatId);
         }
@@ -223,6 +383,12 @@ async function handleGoogleCredential(response) {
 ════════════════════════════════════════ */
 window.confirmLogout = function() {
   if (!confirm('Yakin ingin keluar dari FLYchat?')) return;
+  stopRingtone();
+  if (RTC.pc) endCall(false);
+  if (socket) {
+    try { socket.disconnect(); } catch {}
+    socket = null;
+  }
   apiPost('/api/auth/logout').catch(() => {});
   stopPolling();
   localStorage.removeItem('fc_token');
@@ -489,6 +655,9 @@ async function openChat(chatId, partner) {
   // Load messages
   await loadMessages(chatId);
   startMessagePolling(chatId);
+  if (socket && socket.connected) {
+    socket.emit('chat:join', chatId);
+  }
 }
 
 function updatePartnerStatus(p) {
@@ -545,16 +714,21 @@ async function loadMessages(chatId) {
       }
       list.appendChild(buildMsgBubble(msg));
     });
-    scrollBottom();
+    scrollBottom(true);
   } catch (err) {
     list.innerHTML = '<div class="empty-list-msg">Gagal memuat pesan</div>';
   }
 }
 
-function appendMessage(msg) {
+function appendMessage(msg, forceScroll = false) {
   const list = el('messages-list');
+  if (!list) return;
+
+  // Cek apakah pesan sudah pernah dirender di UI
+  if (msg?.id && document.querySelector(`[data-msg-id="${msg.id}"]`)) return;
+
   list.appendChild(buildMsgBubble(msg));
-  scrollBottom();
+  scrollBottom(forceScroll);
 }
 
 function buildMsgBubble(msg) {
@@ -714,7 +888,10 @@ window.sendMessage = async function() {
 
   try {
     const data = await apiPost(`/api/chats/${currentChatId}/messages`, payload);
-    appendMessage(data.message);
+    appendMessage(data.message, true);
+    if (socket && socket.connected) {
+      socket.emit('message:new', { chatId: currentChatId, message: data.message });
+    }
     refreshChatPreview(currentChatId, text, data.message.created_at);
     sendPushNotif(text);
   } catch (err) {
@@ -795,7 +972,10 @@ async function uploadAndSend(file, type, caption = '') {
     cancelReply();
 
     const data = await apiPost(`/api/chats/${currentChatId}/messages`, msgPayload);
-    appendMessage(data.message);
+    appendMessage(data.message, true);
+    if (socket && socket.connected) {
+      socket.emit('message:new', { chatId: currentChatId, message: data.message });
+    }
     refreshChatPreview(currentChatId, msgPayload.content, data.message.created_at);
     hideToast(toastEl);
     showToast('File terkirim! ✓', 'success');
@@ -854,7 +1034,10 @@ window.shareLocation = function() {
 
     try {
       const data = await apiPost(`/api/chats/${currentChatId}/messages`, payload);
-      appendMessage(data.message);
+      appendMessage(data.message, true);
+      if (socket && socket.connected) {
+        socket.emit('message:new', { chatId: currentChatId, message: data.message });
+      }
       refreshChatPreview(currentChatId, `📍 ${locationName}`, data.message.created_at);
       hideToast(t);
       showToast('Lokasi dibagikan!', 'success');
@@ -1082,46 +1265,199 @@ window.uploadAvatar = async function(input) {
 };
 
 /* ════════════════════════════════════════
-   EMOJI PICKER
+   GOOGLE NOTO EMOJI PICKER
 ════════════════════════════════════════ */
-const EMOJI_CATEGORIES = {
-  'Ekspresi': ['😀','😂','😍','🥰','😎','🤔','😢','😭','😡','🤩','😊','😇','🥳','😜','😴','🤗','😏','🙄','😬'],
-  'Gestur':   ['👍','👎','👏','🙏','🤝','✌️','👋','🫶','💪','🤜','👌','🤌','✋'],
-  'Simbol':   ['❤️','🔥','💯','✅','⭐','🎉','💡','💰','🏆','🎯','💎','🌟','✨','⚡','❄️'],
-  'Alam':     ['🐶','🐱','🦋','🌸','🌈','☀️','🌙','🌍','🍕','🍔','🍦','🎂','☕','🥤'],
-  'Objek':    ['📱','💻','📷','🎵','🎮','✈️','🚗','🏠','📚','🎁','🔒','🎬','🎤']
-};
+const GOOGLE_EMOJI_CATEGORIES = [
+  { id: 'wajah', icon: '😊', name: 'Wajah & Emosi', emojis: [
+    '😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘','😗','😚','😙',
+    '😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐','🤨','😐','😑','😶','😏','😒','🙄','😬','🤥',
+    '😌','😔','😪','🤤','😴','😷','🤒','🤕','🤢','🤮','🤧','🥵','🥶','🥴','😵','🤯','🤠','🥳','🥸','😎',
+    '🤓','🧐','😕','😟','🙁','😮','😯','😲','😳','🥺','😦','😧','😨','😰','😥','😢','😭','😱','😖','😣',
+    '😞','😓','😩','😫','🥱','😤','😡','😠','🤬','😈','👿','💀','☠️','💩','🤡','👻','👽','🤖'
+  ]},
+  { id: 'tangan', icon: '🖐️', name: 'Gestur & Orang', emojis: [
+    '👋','🤚','🖐️','✋','🖖','🫱','🫲','🫳','🫴','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉',
+    '👆','🖕','👇','☝️','🫵','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🤝','🙏','✍️','💅',
+    '🤳','💪','🦾','🦿','🦵','🦶','👂','🦻','👃','🧠','🫀','🫁','🦷','🦴','👀','👁️','👅','👄','🫦','👶',
+    '🧒','👦','👧','🧑','👱','👨','🧔','👩','🧓','👴','👵'
+  ]},
+  { id: 'hati', icon: '❤️', name: 'Hati & Simbol', emojis: [
+    '❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❣️','💕','💞','💓','💗','💖','💘','💝','💟','☮️',
+    '✝️','☪️','🕉️','☸️','✡️','🔯','🕎','☯️','☦️','🛐','⛎','♈','♉','♊','♋','♌','♍','♎','♏','♐',
+    '♑','♒','♓','🆔','⚛️','🉑','☢️','☣️','📴','📳','🈶','🈚','🈸','🈺','🈯','🉐','🈹','🈵','🈴','🈲',
+    '🅰️','🅱️','🆎','🆑','🅾️','🆘','❌','⭕','🛑','⛔','📛','🚫','💯','💢','♨️','🚷','🚯','🚳','🚱','🔞',
+    '📵','🚭','❗','❕','❓','❔','‼️','⁉️','🔅','🔆','〽️','⚠️','🚸','🔱','⚜️','🔰','♻️','✅','💹','❇️',
+    '✳️','❎','🌐','💠','Ⓜ️','🌀','💤','🏧','🚾','♿','🅿️','🈳','🈂️','🛂','🛃','🛄','🛅','🚹','🚺','🚼'
+  ]},
+  { id: 'alam', icon: '🐶', name: 'Hewan & Alam', emojis: [
+    '🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐻‍❄️','🐨','🐯','🦁','🐮','🐷','🐽','🐸','🐵','🙈','🙉','🙊',
+    '🐒','🐔','🐧','🐦','🐤','🐣','🐥','🦆','🦅','🦉','🦇','🐺','🐗','🐴','🦄','🐝','🪱','🐛','🦋','🐌',
+    '🐞','🐜','🪰','🪲','🪳','🦟','🦗','🕷️','🕸️','🦂','🐢','🐍','🦎','🦖','🦕','🐙','🦑','🦐','🦞','🦀',
+    '🐡','🐠','🐟','🐬','🐳','🐋','🦈','🦭','🐊','🐅','🐆','🦓','🦍','🦧','🦣','🐘','🦛','🦏','🐪','🐫',
+    '🦒','🦘','🦬','🐃','🐂','🐄','🐎','🐖','🐏','🐑','🦙','🐐','🦌','🐕','🐩','🦮','🐕‍🦺','🐈','🐈‍⬛','🪶',
+    '🌸','🌺','🌹','🌷','🌼','🌻','💐','🌾','🌿','☘️','🍀','🍁','🍂','🍃','🍄','🌱','🌴','🌲','🌳','🪵',
+    '☀️','🌤️','⛅','🌥️','☁️','🌦️','🌧️','⛈️','🌩️','🌨️','❄️','☃️','⛄','🌈','⚡','🔥','💧','🌊'
+  ]},
+  { id: 'makanan', icon: '🍕', name: 'Makanan & Minuman', emojis: [
+    '🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍈','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🍆','🥑',
+    '🥦','🥬','🥒','🌶️','🫑','🌽','🥕','🫒','🧄','🧅','🥔','🍠','🥐','🥯','🍞','🥖','🥨','🧀','🥚','🍳',
+    '🧈','🥞','🧇','🥓','🥩','🍗','🍖','🦴','🌭','🍔','🍟','🍕','🫓','🥪','🥙','🧆','🌮','🌯','🫔','🥗',
+    '🥘','🫕','🥫','🍝','🍜','🍲','🍛','🍣','🍱','🥟','🦪','🍤','🍙','🍚','🍘','🍥','🥠','🥮','🍢','🍡',
+    '🍧','🍨','🍦','🥧','🧁','🍰','🎂','🍮','🍭','🍬','🍫','🍿','🍩','🍪','🌰','🥜','🍯','🥛','🍼','🫖',
+    '☕','🍵','🧃','🥤','🧋','🍶','🍺','🍻','🥂','🍷','🥃','🍸','🍹','🧉','🍾','🧊'
+  ]},
+  { id: 'olahraga', icon: '⚽', name: 'Aktivitas & Olahraga', emojis: [
+    '⚽','🏀','🏈','⚾','🥎','🎾','🏐','🏉','🥏','🎱','🪀','🏓','🏸','🏒','🏑','🥍','🏏','🪃','🥅','⛳',
+    '🪁','🏹','🎣','🤿','🥊','🥋','🎽','🛹','🛼','🛷','⛸️','🥌','🎿','⛷️','🏂','🪂','🏋️','🤼','🤸','⛹️',
+    '🤺','🤾','🏌️','🏇','🧘','🏄','🏊','🤽','🚣','🧗','🚵','🚴','🏆','🥇','🥈','🥉','🏅','🎖️','🎫','🎟️',
+    '🎪','🤹','🎭','🩰','🎨','🎬','🎤','🎧','🎼','🎹','🥁','🪘','🎷','🎺','🪗','🎸','🪕','🎻','🎲','♟️',
+    '🎯','🎳','🎮','🎰','🧩'
+  ]},
+  { id: 'wisata', icon: '✈️', name: 'Wisata & Tempat', emojis: [
+    '🚗','🚕','🚙','🚌','🚎','🏎️','🚓','🚑','🚒','🚐','🛻','🚚','🚛','🚜','🛴','🚲','🛵','🏍️','🛺','🚨',
+    '🚔','🚍','🚘','🚖','🚡','🚠','🚟','🚃','🚋','🚞','🚝','🚄','🚅','🚈','🚂','🚆','🚇','🚊','🚉','✈️',
+    '🛫','🛬','🛩️','💺','🛰️','🚀','🛸','🚁','🛶','⛵','🚤','🛥️','🛳️','⛴️','🚢','⚓','🛟','🚧','⛽','🚏',
+    '🚦','🚥','🗺️','🗿','🗽','🗼','🏰','🏯','🏟️','🎡','🎢','🎠','⛲','🏖️','🏝️','🏜️','🌋','⛰️','🏔️','🗻',
+    '🏕️','⛺','🛖','🏠','🏡','🏘️','🏚️','🏗️','🏭','🏢','🏬','🏣','🏤','🏥','🏦','🏨','🏪','🏫','🏩','💒',
+    '🏛️','⛪','🕌','🛕','🕍','⛩️','🕋'
+  ]},
+  { id: 'objek', icon: '💡', name: 'Objek & Teknologi', emojis: [
+    '📱','📲','☎️','📞','📟','📠','🔋','🪫','🔌','💻','🖥️','🖨️','⌨️','🖱️','💾','💿','📀','🧮','🎥','🎞️',
+    '📽️','📺','📷','📸','📹','📼','🔍','🔎','🕯️','💡','🔦','🏮','🪔','📔','📕','📖','📗','📘','📙','📚',
+    '📓','📒','📃','📜','📄','📰','🗞️','📑','🔖','🏷️','💰','🪙','💴','💵','💶','💷','💸','💳','🧾','✉️',
+    '📧','📨','📩','📤','📥','📦','📫','📪','📬','📭','📮','🗳️','✏️','✒️','🖋️','🖊️','🖌️','🖍️','📝','💼',
+    '📁','📂','🗂️','📅','📆','🗒️','🗓️','📇','📈','📉','📊','📋','📌','📍','📎','🖇️','📏','📐','✂️','🗃️',
+    '🗄️','🗑️','🔒','🔓','🔏','🔐','🔑','🗝️','🔨','🪓','⛏️','⚒️','🛠️','🗡️','⚔️','💣','🛡️','🪚','🔧','🪛',
+    '🔩','⚙️','🗜️','⚖️','🦯','🔗','⛓️','🧰','🧲','🪜','⚗️','🧪','🧫','🧬','🔬','🔭','📡','💉','🩸','💊',
+    '🩹','🩺','🚪','🪞','🪟','🛏️','🛋️','🪑','🚿','🛁','🧼','🫧','🪥','🧽','🛒','🎁','🎈','🎉','🎊','🪩'
+  ]},
+  { id: 'bendera', icon: '🚩', name: 'Bendera', emojis: [
+    '🇮🇩','🇲🇾','🇸🇬','🇧🇳','🇵🇭','🇹🇭','🇻🇳','🇲🇲','🇰🇭','🇱🇦','🇯🇵','🇰🇷','🇨🇳','🇮🇳','🇸🇦','🇵🇸','🇹🇷','🇦🇪','🇺🇸','🇬🇧',
+    '🇦🇺','🇨🇦','🇩🇪','🇫🇷','🇮🇹','🇪🇸','🇧🇷','🇦🇷','🏁','🚩','🎌','🏴','🏳️','🏳️‍🌈','🏳️‍⚧️','🏴‍☠️'
+  ]}
+];
 
 function buildEmojiPicker() {
   const picker = el('emoji-picker');
+  if (!picker) return;
   picker.innerHTML = '';
-  for (const [cat, emojis] of Object.entries(EMOJI_CATEGORIES)) {
-    const title = document.createElement('div');
-    title.className = 'emoji-cat-title';
-    title.textContent = cat;
-    picker.appendChild(title);
-    const grid = document.createElement('div');
-    grid.className = 'emoji-grid';
-    emojis.forEach(emoji => {
-      const btn = document.createElement('button');
-      btn.className = 'emoji-btn-item';
-      btn.textContent = emoji;
-      btn.addEventListener('click', () => {
-        const inp = el('message-input');
-        const pos = inp.selectionStart;
-        inp.value = inp.value.slice(0,pos) + emoji + inp.value.slice(pos);
-        inp.focus();
-        inp.setSelectionRange(pos + emoji.length, pos + emoji.length);
-      });
-      grid.appendChild(btn);
+
+  const header = document.createElement('div');
+  header.className = 'emoji-picker-header';
+  header.innerHTML = `
+    <div class="emoji-picker-title">
+      <span>✨ Google Noto Emojis</span>
+    </div>
+  `;
+  picker.appendChild(header);
+
+  const searchBox = document.createElement('div');
+  searchBox.className = 'emoji-search-box';
+  const searchInp = document.createElement('input');
+  searchInp.type = 'text';
+  searchInp.className = 'emoji-search-input';
+  searchInp.placeholder = 'Cari emoji Google...';
+  searchBox.appendChild(searchInp);
+  picker.appendChild(searchBox);
+
+  const tabs = document.createElement('div');
+  tabs.className = 'emoji-tabs';
+  GOOGLE_EMOJI_CATEGORIES.forEach((cat, idx) => {
+    const tabBtn = document.createElement('button');
+    tabBtn.type = 'button';
+    tabBtn.className = `emoji-tab-btn ${idx === 0 ? 'active' : ''}`;
+    tabBtn.title = cat.name;
+    tabBtn.textContent = cat.icon;
+    tabBtn.dataset.catId = cat.id;
+    tabBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      tabs.querySelectorAll('.emoji-tab-btn').forEach(b => b.classList.remove('active'));
+      tabBtn.classList.add('active');
+      const targetSec = scrollArea.querySelector(`[data-section="${cat.id}"]`);
+      if (targetSec) {
+        targetSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     });
-    picker.appendChild(grid);
+    tabs.appendChild(tabBtn);
+  });
+  picker.appendChild(tabs);
+
+  const scrollArea = document.createElement('div');
+  scrollArea.className = 'emoji-scroll-area';
+
+  function renderCategorySections(filter = '') {
+    scrollArea.innerHTML = '';
+    const q = filter.trim().toLowerCase();
+    let hasResults = false;
+
+    GOOGLE_EMOJI_CATEGORIES.forEach(cat => {
+      let filteredEmojis = cat.emojis;
+      if (q) {
+        if (cat.name.toLowerCase().includes(q)) {
+          filteredEmojis = cat.emojis;
+        } else {
+          filteredEmojis = cat.emojis.filter(e => e.includes(q));
+        }
+      }
+      if (filteredEmojis.length === 0) return;
+      hasResults = true;
+
+      const sec = document.createElement('div');
+      sec.dataset.section = cat.id;
+      const title = document.createElement('div');
+      title.className = 'emoji-cat-title';
+      title.textContent = `${cat.icon} ${cat.name}`;
+      sec.appendChild(title);
+
+      const grid = document.createElement('div');
+      grid.className = 'emoji-grid';
+      filteredEmojis.forEach(emoji => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'emoji-btn-item';
+        btn.textContent = emoji;
+        btn.title = emoji;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          insertEmojiToInput(emoji);
+        });
+        grid.appendChild(btn);
+      });
+      sec.appendChild(grid);
+      scrollArea.appendChild(sec);
+    });
+
+    if (!hasResults) {
+      scrollArea.innerHTML = '<div style="text-align:center;padding:24px 0;font-size:0.85rem;color:var(--text-m)">Emoji tidak ditemukan</div>';
+    }
   }
+
+  searchInp.addEventListener('input', () => {
+    renderCategorySections(searchInp.value);
+  });
+
+  renderCategorySections();
+  picker.appendChild(scrollArea);
+}
+
+function insertEmojiToInput(emoji) {
+  const inp = el('message-input');
+  if (!inp) return;
+  const pos = inp.selectionStart ?? inp.value.length;
+  inp.value = inp.value.slice(0, pos) + emoji + inp.value.slice(pos);
+  inp.focus();
+  const nextPos = pos + emoji.length;
+  inp.setSelectionRange(nextPos, nextPos);
 }
 
 window.toggleEmojiPicker = function() {
-  el('emoji-picker').classList.toggle('hidden');
+  const p = el('emoji-picker');
+  p.classList.toggle('hidden');
   el('attach-menu').classList.add('hidden');
+  if (!p.classList.contains('hidden')) {
+    const searchInp = p.querySelector('.emoji-search-input');
+    if (searchInp) searchInp.focus();
+  }
 };
 
 /* ════════════════════════════════════════
@@ -1168,28 +1504,31 @@ function sendPushNotif(text) {
 window.closeChatMobile = function() { el('chat-area').classList.remove('active'); };
 
 /* ════════════════════════════════════════
-   VOICE / VIDEO CALL — WebRTC
-   Peer-to-peer via browser WebRTC API.
-   Signaling dilakukan via REST polling
-   (agar kompatibel dengan Vercel serverless).
+   VOICE / VIDEO CALL — WebRTC P2P
+   Kompatibel dengan WebSocket (Socket.io)
+   dan REST polling fallback (Vercel).
 ════════════════════════════════════════ */
 const RTC = {
-  pc:         null,   // RTCPeerConnection
-  localStream: null,
-  callType:   null,   // 'voice' | 'video'
-  isInitiator: false,
-  partnerId:   null,
-  pollTimer:   null,
-  callId:      null
+  pc:                 null,   // RTCPeerConnection
+  localStream:        null,   // MediaStream lokal
+  callType:           null,   // 'voice' | 'video'
+  isInitiator:        false,
+  partnerId:          null,
+  caller:             null,
+  partner:            null,
+  chatId:             null,
+  pollTimer:          null,
+  callId:             null,
+  pendingOffer:       null,
+  iceCandidatesQueue: [],
+  _callTimer:         null
 };
 
 const ICE_SERVERS = {
   iceServers: [
-    // STUN servers (Google — gratis, tidak perlu config)
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    // TURN servers — Open Relay (gratis, rate-limited, cukup untuk testing)
-    // Untuk produksi dengan banyak user, ganti dengan Metered/Twilio/Coturn sendiri
+    { urls: 'stun:stun2.l.google.com:19302' },
     {
       urls:       'turn:openrelay.metered.ca:80',
       username:   'openrelayproject',
@@ -1212,16 +1551,26 @@ window.startVoiceCall = async function() { await initiateCall('voice'); };
 window.startVideoCall = async function() { await initiateCall('video'); };
 
 async function initiateCall(type) {
-  if (!currentPartner) return;
+  if (!currentPartner || !currentChatId) {
+    showToast('Pilih kontak atau buka chat terlebih dahulu', 'error');
+    return;
+  }
   if (RTC.pc) { showToast('Sudah ada panggilan aktif', 'error'); return; }
 
-  RTC.callType    = type;
-  RTC.isInitiator = true;
-  RTC.partnerId   = currentPartner.id;
-  RTC.callId      = `${currentUser.id}_${Date.now()}`;
+  RTC.callType           = type;
+  RTC.isInitiator        = true;
+  RTC.partnerId          = currentPartner.id;
+  RTC.partner            = currentPartner;
+  RTC.caller             = currentUser;
+  RTC.chatId             = currentChatId;
+  RTC.callId             = `${currentUser.id}_${Date.now()}`;
+  RTC.iceCandidatesQueue = [];
 
   try {
-    const constraints = { audio: true, video: type === 'video' };
+    const constraints = {
+      audio: true,
+      video: type === 'video' ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } : false
+    };
     RTC.localStream = await navigator.mediaDevices.getUserMedia(constraints);
   } catch (err) {
     showToast(`Gagal akses ${type === 'video' ? 'kamera/mikrofon' : 'mikrofon'}: ${err.message}`, 'error');
@@ -1231,19 +1580,36 @@ async function initiateCall(type) {
   showCallUI(type, 'outgoing');
   setupPeerConnection();
 
-  // Buat offer
   try {
     const offer = await RTC.pc.createOffer();
     await RTC.pc.setLocalDescription(offer);
 
-    // Kirim offer via chat message (signaling channel)
+    const callPayload = {
+      __rtc__:      true,
+      action:       'offer',
+      callId:       RTC.callId,
+      callType:     type,
+      sdp:          offer.sdp,
+      targetUserId: currentPartner.id,
+      chatId:       currentChatId,
+      caller: {
+        id:        currentUser.id,
+        name:      currentUser.name,
+        photo_url: currentUser.photo_url
+      }
+    };
+
+    // Kirim langsung via Socket jika terhubung
+    if (socket && socket.connected) {
+      socket.emit('call:invite', callPayload);
+    }
+
+    // Kirim via REST signaling channel
     await apiPost(`/api/chats/${currentChatId}/messages`, {
       type:    'text',
-      content: JSON.stringify({ __rtc__: true, action: 'offer', callId: RTC.callId,
-                                callType: type, sdp: offer.sdp })
+      content: JSON.stringify(callPayload)
     });
 
-    // Poll untuk answer
     startSignalingPoll();
   } catch (err) {
     showToast('Gagal memulai panggilan: ' + err.message, 'error');
@@ -1253,99 +1619,135 @@ async function initiateCall(type) {
 
 function setupPeerConnection() {
   RTC.pc = new RTCPeerConnection(ICE_SERVERS);
+  RTC.iceCandidatesQueue = [];
 
   // Tambahkan track lokal
-  RTC.localStream.getTracks().forEach(track => RTC.pc.addTrack(track, RTC.localStream));
+  if (RTC.localStream) {
+    RTC.localStream.getTracks().forEach(track => RTC.pc.addTrack(track, RTC.localStream));
+  }
 
   // Tampilkan video lokal
   const localVideo = el('call-local-video');
-  if (localVideo) localVideo.srcObject = RTC.localStream;
+  if (localVideo && RTC.localStream) {
+    localVideo.srcObject = RTC.localStream;
+    localVideo.play().catch(() => {});
+  }
 
-  // Terima track dari partner
+  // Terima track remote
   RTC.pc.ontrack = (event) => {
+    console.log('WebRTC ontrack event:', event.streams);
     const remoteVideo = el('call-remote-video');
     const remoteAudio = el('call-remote-audio');
-    if (!remoteVideo && !remoteAudio) return;
     const stream = event.streams[0];
-    if (remoteVideo) remoteVideo.srcObject = stream;
-    if (remoteAudio) remoteAudio.srcObject = stream;
+    if (stream) {
+      if (remoteVideo) {
+        remoteVideo.srcObject = stream;
+        remoteVideo.play().catch(() => {});
+      }
+      if (remoteAudio) {
+        remoteAudio.srcObject = stream;
+        remoteAudio.play().catch(() => {});
+      }
+    }
   };
 
-  // ICE candidate — kirim via signaling
+  // Kirim ICE candidate
   RTC.pc.onicecandidate = async (event) => {
-    if (!event.candidate || !currentChatId) return;
-    try {
-      await apiPost(`/api/chats/${currentChatId}/messages`, {
-        type:    'text',
-        content: JSON.stringify({ __rtc__: true, action: 'ice', callId: RTC.callId,
-                                  candidate: event.candidate })
-      });
-    } catch {}
+    if (!event.candidate) return;
+    const cid = RTC.chatId || currentChatId;
+    const tid = RTC.partnerId || currentPartner?.id;
+    if (!cid) return;
+
+    const icePayload = {
+      __rtc__:      true,
+      action:       'ice',
+      callId:       RTC.callId,
+      candidate:    event.candidate,
+      targetUserId: tid,
+      chatId:       cid
+    };
+
+    if (socket && socket.connected && tid) {
+      socket.emit('call:signal', { targetUserId: tid, chatId: cid, callId: RTC.callId, signal: icePayload });
+    }
+
+    apiPost(`/api/chats/${cid}/messages`, {
+      type:    'text',
+      content: JSON.stringify(icePayload)
+    }).catch(() => {});
   };
 
   RTC.pc.onconnectionstatechange = () => {
     const state = RTC.pc?.connectionState;
-    console.log('WebRTC state:', state);
+    console.log('WebRTC connection state:', state);
     if (state === 'connected') {
-      el('call-status')?.textContent && (el('call-status').textContent = 'Tersambung');
+      const statusEl = el('call-status');
+      if (statusEl) statusEl.textContent = 'Tersambung';
       startCallTimer();
     }
     if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-      endCall();
+      endCall(false);
     }
   };
 }
 
-/* Proses pesan signaling yang diterima */
-async function processRtcSignal(msg) {
-  let sig;
-  try { sig = JSON.parse(msg.content); } catch { return false; }
-  if (!sig?.__rtc__) return false;
-  if (sig.callId && RTC.callId && sig.callId !== RTC.callId) return true; // bukan call ini
-
-  if (sig.action === 'offer' && !RTC.isInitiator) {
-    // Terima panggilan masuk
-    RTC.callId   = sig.callId;
-    RTC.callType = sig.callType || 'voice';
-    RTC.partnerId = currentPartner?.id || null;
-    showIncomingCallUI(sig);
-    return true;
+async function addOrQueueIceCandidate(candidate) {
+  if (!RTC.pc || !candidate) return;
+  if (RTC.pc.remoteDescription && RTC.pc.remoteDescription.type) {
+    await RTC.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+  } else {
+    RTC.iceCandidatesQueue.push(candidate);
   }
+}
 
-  if (sig.action === 'answer' && RTC.isInitiator && RTC.pc) {
-    await RTC.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sig.sdp }));
-    return true;
+async function flushIceCandidateQueue() {
+  while (RTC.iceCandidatesQueue && RTC.iceCandidatesQueue.length > 0) {
+    const cand = RTC.iceCandidatesQueue.shift();
+    await RTC.pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
   }
+}
 
-  if (sig.action === 'ice' && RTC.pc) {
-    await RTC.pc.addIceCandidate(new RTCIceCandidate(sig.candidate)).catch(() => {});
-    return true;
-  }
+function handleIncomingCallSignal(data) {
+  if (RTC.pc || RTC.pendingOffer) return; // sedang ada panggilan
+  RTC.pendingOffer = data;
+  RTC.callId       = data.callId;
+  RTC.callType     = data.callType || 'voice';
+  RTC.chatId       = data.chatId;
+  RTC.partnerId    = data.caller?.id || data.senderId;
+  RTC.partner      = data.caller || currentPartner;
 
-  if (sig.action === 'end') {
-    endCall(false);
-    showToast(`${currentPartner?.name || 'Partner'} mengakhiri panggilan`, 'info');
-    return true;
-  }
+  playRingtone();
+  showIncomingCallUI(data);
+}
 
-  if (sig.action === 'reject') {
-    endCall(false);
-    showToast('Panggilan ditolak', 'error');
-    return true;
-  }
+function showIncomingCallUI(data) {
+  const modal = el('incoming-call-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
 
-  return true;
+  const callerName  = data.caller?.name || currentPartner?.name || 'Seseorang';
+  const callerPhoto = data.caller?.photo_url || currentPartner?.photo_url || 'assets/default-avatar.svg';
+
+  el('incoming-caller-name').textContent = callerName;
+  el('incoming-call-type').textContent   = data.callType === 'video' ? '📹 Video Call' : '📞 Voice Call';
+  el('incoming-caller-avatar').src       = callerPhoto;
 }
 
 window.acceptCall = async function() {
+  stopRingtone();
   if (!RTC.pendingOffer) return;
-  const sig = RTC.pendingOffer;
+  const sig      = RTC.pendingOffer;
+  const chatId   = sig.chatId || currentChatId;
+  const targetId = sig.caller?.id || sig.senderId;
 
   try {
-    const constraints = { audio: true, video: sig.callType === 'video' };
+    const constraints = {
+      audio: true,
+      video: sig.callType === 'video' ? { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } : false
+    };
     RTC.localStream = await navigator.mediaDevices.getUserMedia(constraints);
   } catch (err) {
-    showToast('Gagal akses perangkat: ' + err.message, 'error');
+    showToast('Gagal akses kamera/mikrofon: ' + err.message, 'error');
     rejectCall();
     return;
   }
@@ -1354,38 +1756,76 @@ window.acceptCall = async function() {
   showCallUI(sig.callType, 'incoming');
   setupPeerConnection();
 
-  // Set remote offer dan buat answer
-  await RTC.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: sig.sdp }));
-  const answer = await RTC.pc.createAnswer();
-  await RTC.pc.setLocalDescription(answer);
+  try {
+    const offerSdp = sig.sdp || sig.signal?.sdp;
+    await RTC.pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offerSdp }));
+    await flushIceCandidateQueue();
 
-  await apiPost(`/api/chats/${currentChatId}/messages`, {
-    type:    'text',
-    content: JSON.stringify({ __rtc__: true, action: 'answer', callId: RTC.callId, sdp: answer.sdp })
-  });
+    const answer = await RTC.pc.createAnswer();
+    await RTC.pc.setLocalDescription(answer);
 
-  startSignalingPoll();
-  RTC.pendingOffer = null;
+    const answerPayload = {
+      __rtc__:      true,
+      action:       'answer',
+      callId:       RTC.callId,
+      sdp:          answer.sdp,
+      targetUserId: targetId,
+      chatId
+    };
+
+    if (socket && socket.connected && targetId) {
+      socket.emit('call:signal', { targetUserId: targetId, chatId, callId: RTC.callId, signal: answerPayload });
+    }
+
+    await apiPost(`/api/chats/${chatId}/messages`, {
+      type:    'text',
+      content: JSON.stringify(answerPayload)
+    });
+
+    startSignalingPoll();
+  } catch (err) {
+    showToast('Gagal menyambungkan panggilan: ' + err.message, 'error');
+    endCall();
+  }
 };
 
-window.rejectCall = async function() {
-  if (currentChatId) {
-    await apiPost(`/api/chats/${currentChatId}/messages`, {
-      type: 'text', content: JSON.stringify({ __rtc__: true, action: 'reject', callId: RTC.callId })
+window.rejectCall = function() {
+  stopRingtone();
+  const sig = RTC.pendingOffer;
+  const cid = sig?.chatId || RTC.chatId || currentChatId;
+  const tid = sig?.caller?.id || sig?.senderId || RTC.partnerId;
+
+  if (cid) {
+    const rejectPayload = { __rtc__: true, action: 'reject', callId: RTC.callId, targetUserId: tid, chatId: cid };
+    if (socket && socket.connected && tid) {
+      socket.emit('call:reject', { targetUserId: tid, chatId: cid, callId: RTC.callId });
+    }
+    apiPost(`/api/chats/${cid}/messages`, {
+      type: 'text', content: JSON.stringify(rejectPayload)
     }).catch(() => {});
   }
+
   el('incoming-call-modal')?.classList.add('hidden');
   RTC.pendingOffer = null;
+  RTC.callId = RTC.callType = RTC.partnerId = null;
 };
 
 window.endCall = function(notify = true) {
+  stopRingtone();
   clearInterval(RTC.pollTimer);
   clearInterval(RTC._callTimer);
-  RTC.pollTimer = null;
+  RTC.pollTimer = RTC._callTimer = null;
 
-  if (notify && currentChatId) {
-    apiPost(`/api/chats/${currentChatId}/messages`, {
-      type: 'text', content: JSON.stringify({ __rtc__: true, action: 'end', callId: RTC.callId })
+  const cid = RTC.chatId || currentChatId;
+  const tid = RTC.partnerId || currentPartner?.id;
+
+  if (notify && cid) {
+    const endPayload = { __rtc__: true, action: 'end', callId: RTC.callId, targetUserId: tid, chatId: cid };
+    if (socket && socket.connected && tid) {
+      socket.emit('call:end', { targetUserId: tid, chatId: cid, callId: RTC.callId });
+    }
+    apiPost(`/api/chats/${cid}/messages`, {
+      type: 'text', content: JSON.stringify(endPayload)
     }).catch(() => {});
   }
 
@@ -1393,18 +1833,22 @@ window.endCall = function(notify = true) {
     RTC.localStream.getTracks().forEach(t => t.stop());
     RTC.localStream = null;
   }
-  if (RTC.pc) { RTC.pc.close(); RTC.pc = null; }
+  if (RTC.pc) {
+    RTC.pc.close();
+    RTC.pc = null;
+  }
 
   el('call-modal')?.classList.add('hidden');
   el('incoming-call-modal')?.classList.add('hidden');
 
-  RTC.callId = RTC.callType = RTC.partnerId = null;
+  RTC.callId = RTC.callType = RTC.partnerId = RTC.caller = RTC.chatId = RTC.pendingOffer = null;
   RTC.isInitiator = false;
+  RTC.iceCandidatesQueue = [];
 };
 
 window.toggleMic = function() {
   if (!RTC.localStream) return;
-  const track   = RTC.localStream.getAudioTracks()[0];
+  const track = RTC.localStream.getAudioTracks()[0];
   if (!track) return;
   track.enabled = !track.enabled;
   el('btn-toggle-mic').textContent = track.enabled ? '🎤' : '🔇';
@@ -1412,28 +1856,122 @@ window.toggleMic = function() {
 
 window.toggleCamera = function() {
   if (!RTC.localStream) return;
-  const track   = RTC.localStream.getVideoTracks()[0];
+  const track = RTC.localStream.getVideoTracks()[0];
   if (!track) return;
   track.enabled = !track.enabled;
   el('btn-toggle-cam').textContent = track.enabled ? '📷' : '📷🚫';
 };
 
+function showCallUI(type, direction) {
+  const modal = el('call-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+
+  const box = modal.querySelector('.call-modal-box');
+  const isVideo = type === 'video';
+  if (box) {
+    box.classList.toggle('video-mode', isVideo);
+  }
+
+  const partnerName  = RTC.partner?.name || currentPartner?.name || 'Partner';
+  const partnerPhoto = RTC.partner?.photo_url || currentPartner?.photo_url || 'assets/default-avatar.svg';
+
+  el('call-modal-title').textContent = isVideo ? '📹 Video Call' : '📞 Voice Call';
+  el('call-partner-name').textContent  = partnerName;
+  el('call-status').textContent        = direction === 'outgoing' ? 'Menghubungi…' : 'Menerima…';
+  el('call-timer').textContent         = '00:00';
+  el('call-partner-avatar').src        = partnerPhoto;
+
+  el('call-local-video').style.display     = isVideo ? 'block' : 'none';
+  el('call-remote-video').style.display    = isVideo ? 'block' : 'none';
+  el('btn-toggle-cam').style.display       = isVideo ? 'flex' : 'none';
+  el('call-partner-display').style.display = isVideo ? 'none' : 'block';
+}
+
+async function handleRtcSignalEvent(data) {
+  const sig = data.signal || data;
+  if (!sig?.__rtc__) return false;
+  if (sig.callId && RTC.callId && sig.callId !== RTC.callId) return false;
+
+  if (sig.action === 'answer' && RTC.isInitiator && RTC.pc) {
+    await RTC.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sig.sdp }));
+    await flushIceCandidateQueue();
+    return true;
+  }
+
+  if (sig.action === 'ice' && RTC.pc) {
+    await addOrQueueIceCandidate(sig.candidate);
+    return true;
+  }
+
+  if (sig.action === 'end') {
+    endCall(false);
+    showToast('Partner mengakhiri panggilan', 'info');
+    return true;
+  }
+
+  if (sig.action === 'reject') {
+    endCall(false);
+    showToast('Panggilan ditolak oleh partner', 'error');
+    return true;
+  }
+
+  return false;
+}
+
+async function processRtcSignal(msg) {
+  let sig;
+  try { sig = JSON.parse(msg.content); } catch { return false; }
+  if (!sig?.__rtc__) return false;
+  if (sig.callId && RTC.callId && sig.callId !== RTC.callId) return true;
+
+  if (sig.action === 'offer' && !RTC.isInitiator && !RTC.pc) {
+    handleIncomingCallSignal({
+      chatId:       msg.chat_id || currentChatId,
+      senderId:     msg.sender_id,
+      callId:       sig.callId,
+      callType:     sig.callType,
+      sdp:          sig.sdp,
+      caller:       sig.caller,
+      targetUserId: sig.targetUserId
+    });
+    return true;
+  }
+
+  return await handleRtcSignalEvent(sig);
+}
+
 function startSignalingPoll() {
   clearInterval(RTC.pollTimer);
-  let lastSignalTime = new Date().toISOString();
+  const cid = RTC.chatId || currentChatId;
+  let lastSignalTime = new Date(Date.now() - 3000).toISOString();
   RTC.pollTimer = setInterval(async () => {
-    if (!currentChatId || !RTC.pc) { clearInterval(RTC.pollTimer); return; }
+    if (!cid || !RTC.pc) { clearInterval(RTC.pollTimer); return; }
     try {
-      const qs   = `?after=${encodeURIComponent(lastSignalTime)}`;
-      const data = await apiGet(`/api/chats/${currentChatId}/messages${qs}`);
-      for (const msg of (data.messages || [])) {
-        if (new Date(msg.created_at) > new Date(lastSignalTime))
-          lastSignalTime = msg.created_at;
-        if (msg.sender_id !== currentUser.id) {
-          await processRtcSignal(msg);
+      const data = await apiGet(`/api/chats/${cid}/rtc?since=${encodeURIComponent(lastSignalTime)}`);
+      for (const sigItem of (data.signals || [])) {
+        if (new Date(sigItem.created_at) > new Date(lastSignalTime)) {
+          lastSignalTime = sigItem.created_at;
+        }
+        let sig;
+        try { sig = JSON.parse(sigItem.content); } catch {}
+        if (sig?.__rtc__) {
+          await handleRtcSignalEvent(sig);
         }
       }
-    } catch {}
+    } catch {
+      try {
+        const qs   = `?after=${encodeURIComponent(lastSignalTime)}`;
+        const data = await apiGet(`/api/chats/${cid}/messages${qs}`);
+        for (const msg of (data.messages || [])) {
+          if (new Date(msg.created_at) > new Date(lastSignalTime))
+            lastSignalTime = msg.created_at;
+          if (msg.sender_id !== currentUser.id) {
+            await processRtcSignal(msg);
+          }
+        }
+      } catch {}
+    }
   }, 1000);
 }
 
@@ -1448,30 +1986,6 @@ function startCallTimer() {
     const el2 = el('call-timer');
     if (el2) el2.textContent = `${m}:${s}`;
   }, 1000);
-}
-
-function showCallUI(type, direction) {
-  const modal = el('call-modal');
-  if (!modal) return;
-  modal.classList.remove('hidden');
-  el('call-modal-title').textContent = type === 'video' ? '📹 Video Call' : '📞 Voice Call';
-  el('call-partner-name').textContent = currentPartner?.name || 'Partner';
-  el('call-status').textContent = direction === 'outgoing' ? 'Menghubungi…' : 'Menerima…';
-  el('call-timer').textContent = '00:00';
-  el('call-local-video').style.display    = type === 'video' ? '' : 'none';
-  el('call-remote-video').style.display   = type === 'video' ? '' : 'none';
-  el('btn-toggle-cam').style.display      = type === 'video' ? '' : 'none';
-  el('call-partner-avatar').src = currentPartner?.photo_url || 'assets/default-avatar.svg';
-}
-
-function showIncomingCallUI(sig) {
-  RTC.pendingOffer = sig;
-  const modal = el('incoming-call-modal');
-  if (!modal) return;
-  modal.classList.remove('hidden');
-  el('incoming-caller-name').textContent = currentPartner?.name || 'Seseorang';
-  el('incoming-call-type').textContent = sig.callType === 'video' ? '📹 Video Call' : '📞 Voice Call';
-  el('incoming-caller-avatar').src = currentPartner?.photo_url || 'assets/default-avatar.svg';
 }
 
 window.openLightbox = function(src, name) {
@@ -1546,7 +2060,14 @@ function el(id)  { return document.getElementById(id); }
 function v(id)   { return (el(id)?.value || '').trim(); }
 function esc(s)  { return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : ''; }
 function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '…' : (s || ''); }
-function scrollBottom() { const c = el('messages-container'); if (c) c.scrollTop = c.scrollHeight; }
+function scrollBottom(force = false) {
+  const c = el('messages-container');
+  if (!c) return;
+  const isNearBottom = (c.scrollHeight - c.scrollTop - c.clientHeight) <= 140;
+  if (force || isNearBottom) {
+    c.scrollTop = c.scrollHeight;
+  }
+}
 
 window.togglePassword = function(id, btn) {
   const inp = el(id);

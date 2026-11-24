@@ -19,7 +19,7 @@
   <!-- Styles -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -145,47 +145,98 @@
     <!-- SIDEBAR -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <div class="user-info-mini" onclick="showScreen('profile-screen')" role="button" tabindex="0" aria-label="Profil saya">
-          <div class="avatar-container">
-            <img id="sidebar-avatar" src="assets/default-avatar.svg" alt="avatar saya" class="avatar-sm" />
-            <span class="online-dot" id="my-online-dot"></span>
+        <!-- Logo Flychat -->
+        <div class="flychat-brand" onclick="switchNavSection('home', el('nav-item-home'))" role="button" tabindex="0" title="FLYchat Home">
+          <div class="flychat-logo-circle">
+            <svg viewBox="0 0 120 96" xmlns="http://www.w3.org/2000/svg" width="28" height="23">
+              <path d="M60 12 C36 12, 6 30, 6 54 C6 66, 18 78, 36 72 C42 70, 48 62, 60 54 C72 62, 78 70, 84 72 C102 78, 114 66, 114 54 C114 30, 84 12, 60 12Z" fill="white"/>
+              <path d="M60 54 C54 42, 42 33, 30 30 C42 26, 58 34, 60 12 C62 34, 78 26, 90 30 C78 33, 66 42, 60 54Z" fill="rgba(255,255,255,0.4)"/>
+            </svg>
           </div>
-          <div>
-            <div id="sidebar-name" class="sidebar-username">User</div>
-            <div id="sidebar-status" class="sidebar-userstatus">Hei, aku pakai FLYchat!</div>
+          <div class="flychat-brand-info">
+            <span class="flychat-brand-name">FLYchat</span>
+            <span class="flychat-brand-tagline">Real-time messenger</span>
           </div>
         </div>
         <div class="sidebar-actions">
-          <button class="icon-btn" title="Tambah kontak" onclick="showAddContact()" aria-label="Tambah kontak">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          </button>
           <button class="icon-btn" title="Tema gelap/terang" onclick="toggleTheme()" aria-label="Toggle tema" id="theme-btn">🌙</button>
-          <button class="icon-btn" title="Pengaturan" onclick="showScreen('profile-screen')" aria-label="Pengaturan">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </button>
         </div>
       </div>
 
       <div class="search-box">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="search" id="search-contacts" placeholder="Cari percakapan..." oninput="filterContacts(this.value)" aria-label="Cari percakapan" />
+        <input type="search" id="search-contacts" placeholder="Cari percakapan..." oninput="handleUniversalSearch(this.value)" aria-label="Cari" />
       </div>
 
-      <div class="chat-tabs" role="tablist">
-        <button class="tab-btn active" role="tab" onclick="switchTab('chats',this)" aria-selected="true">
-          💬 Pesan
+      <!-- Section 1: Home / Beranda (Pesan & Kontak) -->
+      <div id="section-chats" class="nav-section-container">
+        <div class="chat-tabs" role="tablist">
+          <button class="tab-btn active" role="tab" onclick="switchTab('chats',this)" aria-selected="true">
+            💬 Pesan
+          </button>
+          <button class="tab-btn" role="tab" onclick="switchTab('contacts',this)" aria-selected="false">
+            👥 Kontak
+          </button>
+        </div>
+        <div id="chat-list" class="chat-list" role="list"></div>
+        <div id="contacts-list" class="chat-list hidden" role="list"></div>
+      </div>
+
+      <!-- Section 2: Riwayat Telepon -->
+      <div id="section-calls" class="nav-section-container hidden">
+        <div class="section-sub-header">
+          <span class="section-title">Riwayat Panggilan</span>
+          <button class="clear-logs-btn" onclick="clearCallLogs()" title="Hapus riwayat panggilan">Bersihkan</button>
+        </div>
+        <div id="calls-list" class="chat-list" role="list"></div>
+      </div>
+
+      <!-- Section 3: Grup / Kelompok -->
+      <div id="section-groups" class="nav-section-container hidden">
+        <div class="section-sub-header">
+          <span class="section-title">Grup & Kelompok</span>
+          <button class="create-group-btn" onclick="openCreateGroupModal()">+ Buat Grup</button>
+        </div>
+        <div id="groups-list" class="chat-list" role="list"></div>
+      </div>
+
+      <!-- NAVBAR / TASKBAR (naskbar) -->
+      <nav class="bottom-taskbar" id="bottom-taskbar" role="navigation" aria-label="Navigasi Utama">
+        <button class="taskbar-item active" id="nav-item-home" onclick="switchNavSection('home', this)" title="Beranda">
+          <div class="taskbar-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <span class="taskbar-label">Beranda</span>
         </button>
-        <button class="tab-btn" role="tab" onclick="switchTab('contacts',this)" aria-selected="false">
-          👥 Kontak
+
+        <button class="taskbar-item" id="nav-item-calls" onclick="switchNavSection('calls', this)" title="Riwayat Telepon">
+          <div class="taskbar-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44a2 2 0 0 1 1.99-2.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.09a16 16 0 0 0 6 6l.94-.94a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7a2 2 0 0 1 1.72 2.01z"/></svg>
+          </div>
+          <span class="taskbar-label">Panggilan</span>
         </button>
-      </div>
 
-      <div id="chat-list" class="chat-list" role="list"></div>
-      <div id="contacts-list" class="chat-list hidden" role="list"></div>
+        <button class="taskbar-item" id="nav-item-groups" onclick="switchNavSection('groups', this)" title="Grup / Kelompok">
+          <div class="taskbar-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </div>
+          <span class="taskbar-label">Grup</span>
+        </button>
 
-      <div class="sidebar-footer">
-        🦋 FLYchat &nbsp;·&nbsp; <span id="app-version">v2.0</span>
-      </div>
+        <button class="taskbar-item" id="nav-item-add-contact" onclick="triggerNavAddContact()" title="Tambah Kontak">
+          <div class="taskbar-icon add-btn-highlight">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+          </div>
+          <span class="taskbar-label">Kontak +</span>
+        </button>
+
+        <button class="taskbar-item" id="nav-item-profile" onclick="triggerNavProfile()" title="Profil Pengguna">
+          <div class="taskbar-icon">
+            <img id="nav-user-avatar" src="assets/default-avatar.svg" alt="Profil" class="nav-avatar-img" />
+          </div>
+          <span class="taskbar-label">Profil</span>
+        </button>
+      </nav>
     </aside>
 
     <!-- CHAT AREA -->
@@ -325,6 +376,33 @@
         <button class="btn-primary small" onclick="searchUser()">🔍 Cari</button>
       </div>
       <div id="search-result" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <!-- Create Group Modal -->
+  <div id="create-group-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="create-group-title">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="create-group-title">👥 Buat Grup Baru</h3>
+        <button onclick="closeModal('create-group-modal')" aria-label="Tutup">✕</button>
+      </div>
+      <div style="padding:14px 0">
+        <div class="form-group" style="margin-bottom:12px">
+          <label style="font-size:.82rem;font-weight:600;color:var(--text-b);display:block;margin-bottom:6px">Nama Grup</label>
+          <input type="text" id="group-name-input" placeholder="Misal: Tim Sukses / Sahabat 🦋" class="modal-input" maxlength="50" style="width:100%;box-sizing:border-box" />
+        </div>
+        <div class="form-group" style="margin-bottom:14px">
+          <label style="font-size:.82rem;font-weight:600;color:var(--text-b);display:block;margin-bottom:6px">Deskripsi Grup (opsional)</label>
+          <input type="text" id="group-desc-input" placeholder="Keterangan singkat grup..." class="modal-input" maxlength="120" style="width:100%;box-sizing:border-box" />
+        </div>
+        <div class="form-group" style="margin-bottom:16px">
+          <label style="font-size:.82rem;font-weight:600;color:var(--text-b);display:block;margin-bottom:6px">Pilih Anggota dari Kontak</label>
+          <div id="group-contacts-picker" class="group-contacts-picker" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:10px;padding:6px"></div>
+        </div>
+        <button class="btn-primary" onclick="submitCreateGroup()" style="width:100%;padding:11px">
+          ✨ Buat Grup Sekarang
+        </button>
+      </div>
     </div>
   </div>
 
@@ -567,6 +645,8 @@
   </div>
 </div>
 
+<!-- Socket.io (real-time WebSocket & direct calling) -->
+<script src="/socket.io/socket.io.js" onerror="console.info('Socket.io script not reachable, using HTTP polling fallback')"></script>
 <!-- Runtime config -->
 <script src="config.js"></script>
 <!-- FLYchat App -->
