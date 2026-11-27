@@ -77,9 +77,12 @@ router.post('/google', async (req, res) => {
         const { OAuth2Client } = require('google-auth-library');
         const clientId = process.env.GOOGLE_CLIENT_ID;
         if (!clientId || clientId.includes('YOUR_GOOGLE_CLIENT_ID')) {
-          // Fallback: decode tanpa verifikasi jika Client ID belum diisi
-          // Ini mempertahankan kompatibilitas dengan mode development
-          console.warn('⚠️  GOOGLE_CLIENT_ID belum diisi, skip verifikasi signature');
+          // Fallback development: decode tanpa verifikasi.
+          // Di produksi hal ini BERBAHAYA (token bisa dipalsukan) → tolak.
+          if (process.env.NODE_ENV === 'production') {
+            return res.status(500).json({ error: 'Login Google belum dikonfigurasi di server (GOOGLE_CLIENT_ID kosong)' });
+          }
+          console.warn('⚠️  GOOGLE_CLIENT_ID belum diisi, skip verifikasi signature (mode development)');
           const parts = credential.split('.');
           payload = JSON.parse(Buffer.from(
             parts[1].replace(/-/g, '+').replace(/_/g, '/'),

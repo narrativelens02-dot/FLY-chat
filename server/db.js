@@ -96,12 +96,98 @@ async function initDB() {
     )
   `;
 
+  /* ─── GRUP / GROUP CHAT ─── */
+  await sql`
+    CREATE TABLE IF NOT EXISTS chat_groups (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      photo_url   TEXT DEFAULT '',
+      created_by  TEXT REFERENCES users(id) ON DELETE SET NULL,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS chat_group_members (
+      group_id   TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role       TEXT NOT NULL DEFAULT 'member',   -- admin | member
+      joined_at  TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (group_id, user_id)
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS chat_group_messages (
+      id               TEXT PRIMARY KEY,
+      group_id         TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+      sender_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type             TEXT NOT NULL DEFAULT 'text',
+      content          TEXT DEFAULT '',
+      file_url         TEXT DEFAULT '',
+      file_name        TEXT DEFAULT '',
+      file_size        TEXT DEFAULT '',
+      caption          TEXT DEFAULT '',
+      lat              DOUBLE PRECISION,
+      lng              DOUBLE PRECISION,
+      location_name    TEXT DEFAULT '',
+      reply_to_id      TEXT,
+      reply_to_sender  TEXT DEFAULT '',
+      reply_to_text    TEXT DEFAULT '',
+      is_deleted       BOOLEAN DEFAULT FALSE,
+      deleted_at       TIMESTAMPTZ,
+      created_at       TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS chat_group_reactions (
+      message_id TEXT NOT NULL REFERENCES chat_group_messages(id) ON DELETE CASCADE,
+      user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      emoji      TEXT NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (message_id, user_id)
+    )
+  `;
+
+  await sql`
+    CREATE TABLE IF NOT EXISTS chat_group_reads (
+      group_id     TEXT NOT NULL REFERENCES chat_groups(id) ON DELETE CASCADE,
+      user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      last_read_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (group_id, user_id)
+    )
+  `;
+
+  /* ─── WEBRTC SIGNALING — persisten agar jalan di Vercel / multi-instance ─── */
+  await sql`
+    CREATE TABLE IF NOT EXISTS rtc_signals (
+      id         TEXT PRIMARY KEY,
+      chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      sender_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      call_id    TEXT,
+      content    TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+
+  /* Migrasi kolom tambahan untuk tabel lama */
+  await sql`ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE reactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`;
+
   /* Indexes untuk performa */
   await sql`CREATE INDEX IF NOT EXISTS idx_chats_p1 ON chats(participant1_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_chats_p2 ON chats(participant2_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id, created_at ASC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_reset_user ON password_resets(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_group_members_user ON chat_group_members(user_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_group_messages_group ON chat_group_messages(group_id, created_at ASC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_group_reactions_message ON chat_group_reactions(message_id)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_rtc_signals_target ON rtc_signals(target_id, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_rtc_signals_chat ON rtc_signals(chat_id, created_at DESC)`;
 
   console.log('✅ Database schema ready');
 }
