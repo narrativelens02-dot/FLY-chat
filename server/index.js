@@ -64,6 +64,8 @@ const io = new Server(server, {
   transports: ['websocket', 'polling']
 });
 
+app.set('io', io);          // agar route dapat meng-emit event realtime
+
 const PORT = process.env.PORT || 3000;
 
 /* ═══════════════════════════════════════
@@ -86,6 +88,7 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/api/auth',   require('./routes/auth'));
 app.use('/api/users',  require('./routes/users'));
 app.use('/api/chats',  require('./routes/chats'));
+app.use('/api/groups', require('./routes/groups'));
 app.use('/api/upload', require('./routes/upload'));
 
 /* Health check */
@@ -94,6 +97,13 @@ app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISO
 /* SPA fallback — semua route ke index.html */
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
+/* Global error handler — cegah request menggantung saat error async */
+app.use((err, req, res, next) => {
+  console.error('API error:', err);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({ error: err.message || 'Terjadi kesalahan server' });
 });
 
 /* ═══════════════════════════════════════
@@ -129,14 +139,46 @@ io.on('connection', async (socket) => {
   /* Join personal room untuk notifikasi & direct WebRTC calls */
   socket.join(`user:${userId}`);
 
-  /* ── Join chat room ── */
-  socket.on('chat:join', (chatId) => {
-    socket.join(`chat:${chatId}`);
+  /* ── Join chat room (verifikasi participant) ── */
+  socket.on('chat:join', async (chatId) => {
+    if (!chatId) return;
+    const rows = await sql`
+      SELECT id FROM chats
+      WHERE id = ${chatId}
+        AND (participant1_id = ${userId} OR participant2_id = ${userId})
+    `.catch(() => []);
+    if (rows.length) socket.join(`chat:${chatId}`);
   });
 
   /* ── Leave chat room ── */
   socket.on('chat:leave', (chatId) => {
     socket.leave(`chat:${chatId}`);
+  });
+
+  /* ── Group rooms (verifikasi anggota) ── */
+  socket.on('group:join', async (groupId) => {
+    if (!groupId) return;
+    const rows = await sql`
+      SELECT group_id FROM chat_group_members
+      WHERE group_id = ${groupId} AND user_id = ${userId}
+    `.catch(() => []);
+    if (rows.length) socket.join(`group:${groupId}`);
+  });
+
+  socket.on('group:leave', (groupId) => {
+    socket.leave(`group:${groupId}`);
+  });
+
+  socket.on('group:typing:start', ({ groupId }) => {
+    if (!groupId) return;
+    socket.to(`group:${groupId}`).emit('group:typing:start', {
+      groupId, userId, userName: socket.user.name
+    });
+  });
+
+  socket.on('group:typing:stop', ({ groupId }) => {
+    if (!groupId) return;
+    socket.to(`group:${groupId}`).emit('group:typing:stop', { groupId, userId });
   });
 
   /* ── Typing indicator ── */
@@ -219,11 +261,32 @@ io.on('connection', async (socket) => {
 (async () => {
   try {
     await initDB();
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`\n🦋 FLYchat server running`);
-      console.log(`   Local:   http://localhost:${PORT}`);
-      console.log(`   API:     http://localhost:${PORT}/api/health\n`);
-    });
+
+    // Auto-retry on EADDRINUSE: coba port berikutnya
+    function listenWithFallback(port, maxRetries = 10) {
+      return new Promise((resolve, reject) => {
+        function tryListen(p, retries) {
+          server.listen(p, '0.0.0.0')
+            .once('listening', () => resolve(p))
+            .once('error', err => {
+              server.removeAllListeners('error');
+              server.removeAllListeners('listening');
+              if (err.code === 'EADDRINUSE' && retries > 0) {
+                console.warn(`⚠️  Port ${p} sedang dipakai, mencoba port ${p + 1}...`);
+                tryListen(p + 1, retries - 1);
+              } else {
+                reject(err);
+              }
+            });
+        }
+        tryListen(port, maxRetries);
+      });
+    }
+
+    const usedPort = await listenWithFallback(PORT);
+    console.log(`\n🦋 FLYchat server running`);
+    console.log(`   Local:   http://localhost:${usedPort}`);
+    console.log(`   API:     http://localhost:${usedPort}/api/health\n`);
   } catch (err) {
     console.error('❌ Failed to start server:', err.message);
     process.exit(1);

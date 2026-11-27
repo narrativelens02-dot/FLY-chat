@@ -3,15 +3,11 @@ const router = require('express').Router();
 const auth   = require('../middleware/auth');
 const { sql } = require('../db');
 const { v4: uuid } = require('uuid');
+const { ah, emitTo } = require('../utils');
 
-/**
- * In-memory store untuk sinyal WebRTC (offer/answer/ICE).
- * Tidak disimpan ke DB — hidup hanya 60 detik, cukup untuk handshake.
- * Array of { chat_id, sender_id, content, created_at }
- */
-const rtcStore = [];
-
-/* helper: apakah user adalah participant chat */
+/* ════════════════════════════════════════
+   HELPERS
+════════════════════════════════════════ */
 async function assertParticipant(chatId, userId, res) {
   const [c] = await sql`SELECT * FROM chats WHERE id = ${chatId}`;
   if (!c) { res.status(404).json({ error: 'Chat tidak ditemukan' }); return null; }
@@ -21,8 +17,58 @@ async function assertParticipant(chatId, userId, res) {
   return c;
 }
 
-/* ── List my chats ── */
-router.get('/', auth, async (req, res) => {
+async function reactionMapFor(messageIds) {
+  if (!messageIds.length) return {};
+  const rows = await sql`
+    SELECT message_id, user_id, emoji
+    FROM reactions
+    WHERE message_id = ANY(${messageIds})
+  `;
+  const map = {};
+  rows.forEach(r => {
+    if (!map[r.message_id]) map[r.message_id] = {};
+    map[r.message_id][r.user_id] = r.emoji;
+  });
+  return map;
+}
+
+async function reactionRowsForChat(chatId) {
+  return sql`
+    SELECT r.message_id, r.user_id, r.emoji
+    FROM reactions r
+    JOIN messages m ON m.id = r.message_id
+    WHERE m.chat_id = ${chatId}
+  `;
+}
+
+/* Typing indicator (ephemeral, per-instance) */
+const typingStore = new Map();
+const TYPING_TTL  = 5000;
+
+function setTyping(chatId, userId, name, on) {
+  const key = `${chatId}:${userId}`;
+  if (on) typingStore.set(key, { name, updated_at: Date.now() });
+  else typingStore.delete(key);
+}
+
+function activeTypers(chatId, exceptUserId) {
+  const now = Date.now();
+  const out = [];
+  for (const [key, val] of typingStore) {
+    if (now - val.updated_at > TYPING_TTL) { typingStore.delete(key); continue; }
+    const sep = key.lastIndexOf(':');
+    const keyChat = key.slice(0, sep);
+    const keyUser = key.slice(sep + 1);
+    if (keyChat !== chatId || keyUser === exceptUserId) continue;
+    out.push({ user_id: keyUser, name: val.name });
+  }
+  return out;
+}
+
+/* ════════════════════════════════════════
+   LIST MY CHATS
+════════════════════════════════════════ */
+router.get('/', auth, ah(async (req, res) => {
   const rows = await sql`
     SELECT c.*,
       u1.id AS p1_id, u1.name AS p1_name, u1.photo_url AS p1_photo, u1.online AS p1_online, u1.show_online AS p1_show_online, u1.last_seen AS p1_last_seen,
@@ -54,15 +100,19 @@ router.get('/', auth, async (req, res) => {
   });
 
   res.json({ chats });
-});
+}));
 
-/* ── Find or create chat ── */
-router.post('/', auth, async (req, res) => {
-  const { partner_id } = req.body;
+/* ════════════════════════════════════════
+   FIND OR CREATE CHAT
+════════════════════════════════════════ */
+router.post('/', auth, ah(async (req, res) => {
+  const { partner_id } = req.body || {};
   if (!partner_id) return res.status(400).json({ error: 'partner_id diperlukan' });
   if (partner_id === req.user.id) return res.status(400).json({ error: 'Tidak bisa chat dengan diri sendiri' });
 
-  // Check exist (either direction)
+  const [partner] = await sql`SELECT id FROM users WHERE id = ${partner_id}`;
+  if (!partner) return res.status(404).json({ error: 'Pengguna tidak ditemukan' });
+
   const [existing] = await sql`
     SELECT id FROM chats
     WHERE (participant1_id = ${req.user.id} AND participant2_id = ${partner_id})
@@ -74,60 +124,86 @@ router.post('/', auth, async (req, res) => {
   await sql`
     INSERT INTO chats (id, participant1_id, participant2_id)
     VALUES (${chatId}, ${req.user.id}, ${partner_id})
+    ON CONFLICT DO NOTHING
   `;
-  res.status(201).json({ chat_id: chatId, created: true });
-});
 
-/* ── Check for incoming call signals for current user (HTTP polling fallback) ── */
-router.get('/rtc/incoming', auth, async (req, res) => {
-  const cutoff = Date.now() - 35_000;
-  const recent = rtcStore.filter(s =>
-    s.target_id === req.user.id &&
-    new Date(s.created_at).getTime() > cutoff
-  );
+  const [row] = await sql`
+    SELECT id FROM chats
+    WHERE (participant1_id = ${req.user.id} AND participant2_id = ${partner_id})
+       OR (participant1_id = ${partner_id}   AND participant2_id = ${req.user.id})
+    LIMIT 1
+  `;
+
+  res.status(201).json({ chat_id: row?.id || chatId, created: true });
+}));
+
+/* ════════════════════════════════════════
+   WEBRTC SIGNALING — disimpan di Postgres
+   (persisten, aman untuk Vercel / multi-instance)
+════════════════════════════════════════ */
+router.get('/rtc/incoming', auth, ah(async (req, res) => {
+  const rows = await sql`
+    SELECT * FROM rtc_signals
+    WHERE target_id = ${req.user.id}
+      AND created_at > NOW() - INTERVAL '40 seconds'
+    ORDER BY created_at DESC
+  `;
+
+  const parsed = rows.map(r => {
+    let sig = null;
+    try { sig = JSON.parse(r.content); } catch {}
+    return { row: r, sig };
+  }).filter(x => x.sig && x.sig.__rtc__);
 
   let activeOffer = null;
-  for (let i = recent.length - 1; i >= 0; i--) {
-    try {
-      const parsed = JSON.parse(recent[i].content);
-      if (parsed?.__rtc__ && parsed.action === 'offer') {
-        const isCancelled = recent.some(p => {
-          try {
-            const pSig = JSON.parse(p.content);
-            return pSig.callId === parsed.callId && (pSig.action === 'end' || pSig.action === 'reject');
-          } catch { return false; }
-        });
-        if (!isCancelled) {
-          activeOffer = {
-            chat_id:    recent[i].chat_id,
-            sender_id:  recent[i].sender_id,
-            signal:     parsed,
-            created_at: recent[i].created_at
-          };
-          break;
-        }
-      }
-    } catch {}
+  for (const item of parsed) {
+    if (item.sig.action !== 'offer') continue;
+    const cancelled = parsed.some(p =>
+      p.sig.callId === item.sig.callId &&
+      (p.sig.action === 'end' || p.sig.action === 'reject')
+    );
+    if (!cancelled) {
+      activeOffer = {
+        chat_id:    item.row.chat_id,
+        sender_id:  item.row.sender_id,
+        signal:     item.sig,
+        created_at: item.row.created_at
+      };
+      break;
+    }
   }
-  res.json({ incoming: activeOffer });
-});
 
-/* ── Dedicated fast in-memory RTC signal polling for a chat ── */
-router.get('/:id/rtc', auth, async (req, res) => {
+  res.json({ incoming: activeOffer });
+}));
+
+router.get('/:id/rtc', auth, ah(async (req, res) => {
   const c = await assertParticipant(req.params.id, req.user.id, res);
   if (!c) return;
 
   const since = req.query.since || req.query.after;
-  let signals = rtcStore.filter(s => s.chat_id === req.params.id && s.sender_id !== req.user.id);
-  if (since) {
-    const sinceTime = new Date(since).getTime();
-    signals = signals.filter(s => new Date(s.created_at).getTime() > sinceTime);
-  }
-  res.json({ signals });
-});
+  const signals = since
+    ? await sql`
+        SELECT * FROM rtc_signals
+        WHERE chat_id = ${req.params.id}
+          AND sender_id <> ${req.user.id}
+          AND created_at > ${since}::timestamptz
+        ORDER BY created_at ASC
+      `
+    : await sql`
+        SELECT * FROM rtc_signals
+        WHERE chat_id = ${req.params.id}
+          AND sender_id <> ${req.user.id}
+          AND created_at > NOW() - INTERVAL '40 seconds'
+        ORDER BY created_at ASC
+      `;
 
-/* ── Mark chat as read ── */
-router.patch('/:id/read', auth, async (req, res) => {
+  res.json({ signals });
+}));
+
+/* ════════════════════════════════════════
+   MARK CHAT AS READ
+════════════════════════════════════════ */
+router.patch('/:id/read', auth, ah(async (req, res) => {
   const c = await assertParticipant(req.params.id, req.user.id, res);
   if (!c) return;
 
@@ -137,125 +213,108 @@ router.patch('/:id/read', auth, async (req, res) => {
     await sql`UPDATE chats SET unread2 = 0 WHERE id = ${req.params.id}`;
   }
   res.json({ ok: true });
-});
+}));
 
-/* ── Get messages ── */
-router.get('/:id/messages', auth, async (req, res) => {
+/* ════════════════════════════════════════
+   GET MESSAGES
+════════════════════════════════════════ */
+router.get('/:id/messages', auth, ah(async (req, res) => {
   const c = await assertParticipant(req.params.id, req.user.id, res);
   if (!c) return;
 
-  const limit  = Math.min(parseInt(req.query.limit) || 100, 200);
-  const before = req.query.before;
-  const after  = req.query.after;  // ← untuk polling incremental
+  const limit        = Math.min(parseInt(req.query.limit) || 100, 200);
+  const before       = req.query.before;
+  const after        = req.query.after;          // polling incremental
+  const deletedAfter = req.query.deleted_after;  // polling penghapusan
 
-  let messages;
+  let rows;
   if (after) {
-    // Ambil hanya pesan baru setelah timestamp tertentu (untuk polling)
-    messages = await sql`
+    rows = await sql`
       SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
       FROM messages m JOIN users u ON u.id = m.sender_id
       WHERE m.chat_id = ${req.params.id}
-        AND m.is_deleted = FALSE
         AND m.created_at > ${after}::timestamptz
-      ORDER BY m.created_at ASC LIMIT ${limit}
+      ORDER BY m.created_at DESC LIMIT ${limit}
     `;
   } else if (before) {
-    messages = await sql`
+    rows = await sql`
       SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
       FROM messages m JOIN users u ON u.id = m.sender_id
-      WHERE m.chat_id = ${req.params.id} AND m.is_deleted = FALSE
-        AND m.created_at < ${before}
-      ORDER BY m.created_at ASC LIMIT ${limit}
+      WHERE m.chat_id = ${req.params.id}
+        AND m.created_at < ${before}::timestamptz
+      ORDER BY m.created_at DESC LIMIT ${limit}
     `;
   } else {
-    messages = await sql`
+    rows = await sql`
       SELECT m.*, u.name AS sender_name, u.photo_url AS sender_photo
       FROM messages m JOIN users u ON u.id = m.sender_id
-      WHERE m.chat_id = ${req.params.id} AND m.is_deleted = FALSE
-      ORDER BY m.created_at ASC LIMIT ${limit}
+      WHERE m.chat_id = ${req.params.id}
+      ORDER BY m.created_at DESC LIMIT ${limit}
     `;
   }
 
-  // Attach reactions
-  const msgIds = messages.map(m => m.id);
-  const reactions = msgIds.length
-    ? await sql`
-        SELECT r.message_id, r.user_id, r.emoji, u.name AS user_name
-        FROM reactions r JOIN users u ON u.id = r.user_id
-        WHERE r.message_id = ANY(${msgIds})
-      `
-    : [];
-
-  const reactionMap = {};
-  reactions.forEach(r => {
-    if (!reactionMap[r.message_id]) reactionMap[r.message_id] = {};
-    reactionMap[r.message_id][r.user_id] = r.emoji;
-  });
-
+  const messages = rows.reverse();
+  const reactionMap = await reactionMapFor(messages.map(m => m.id));
   const result = messages.map(m => ({ ...m, reactions: reactionMap[m.id] || {} }));
 
-  // Jika request polling (after param), sertakan sinyal RTC dari in-memory store
+  const extras = { reactions: [], deleted: [], typing: [] };
   if (after) {
-    const rtcSignals = rtcStore.filter(s =>
-      s.chat_id === req.params.id &&
-      s.sender_id !== req.user.id &&
-      new Date(s.created_at) > new Date(after)
-    );
-    rtcSignals.forEach(s => {
-      result.push({
-        id:         `rtc_mem_${s.created_at}`,
-        chat_id:    s.chat_id,
-        sender_id:  s.sender_id,
-        type:       'text',
-        content:    s.content,
-        created_at: s.created_at,
-        is_deleted: false,
-        reactions:  {}
-      });
-    });
-    // Sort by created_at agar urut
-    result.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    extras.reactions = await reactionRowsForChat(req.params.id);
+    extras.deleted = deletedAfter
+      ? await sql`
+          SELECT id, deleted_at FROM messages
+          WHERE chat_id = ${req.params.id} AND is_deleted = TRUE
+            AND deleted_at > ${deletedAfter}::timestamptz
+        `
+      : await sql`
+          SELECT id, deleted_at FROM messages
+          WHERE chat_id = ${req.params.id} AND is_deleted = TRUE AND deleted_at IS NOT NULL
+        `;
+    extras.typing = activeTypers(req.params.id, req.user.id);
   }
 
-  res.json({ messages: result });
-});
+  res.json({ messages: result, ...extras });
+}));
 
-/* ── Send message ── */
-router.post('/:id/messages', auth, async (req, res) => {
+/* ════════════════════════════════════════
+   SEND MESSAGE
+════════════════════════════════════════ */
+router.post('/:id/messages', auth, ah(async (req, res) => {
   const c = await assertParticipant(req.params.id, req.user.id, res);
   if (!c) return;
 
   const { type = 'text', content = '', file_url = '', file_name = '',
           file_size = '', caption = '', lat, lng, location_name = '',
-          reply_to_id, reply_to_sender = '', reply_to_text = '' } = req.body;
+          reply_to_id, reply_to_sender = '', reply_to_text = '' } = req.body || {};
 
-  // ── WebRTC signaling: simpan sementara di memori, TIDAK ke DB ──
-  // Pesan dengan {__rtc__:true} adalah sinyal voice/video call,
-  // bukan pesan chat sungguhan — jangan polusi DB
+  if (type === 'text' && String(content).length > 4000) {
+    return res.status(400).json({ error: 'Pesan terlalu panjang (maks 4000 karakter)' });
+  }
+
+  /* ── WebRTC signaling: simpan di DB, TIDAK masuk messages ── */
   if (type === 'text' && content) {
     let sig;
     try { sig = JSON.parse(content); } catch {}
     if (sig?.__rtc__ === true) {
-      // Deteksi user tujuan
       const targetId = c.participant1_id === req.user.id ? c.participant2_id : c.participant1_id;
-      // Simpan ke in-memory store dengan TTL 60 detik
-      rtcStore.push({
-        chat_id:    req.params.id,
-        sender_id:  req.user.id,
-        target_id:  targetId,
-        content,
-        created_at: new Date().toISOString()
-      });
-      // Hapus sinyal lama (>60 detik) untuk mencegah memory leak
-      const cutoff = Date.now() - 60_000;
-      while (rtcStore.length && new Date(rtcStore[0].created_at).getTime() < cutoff) {
-        rtcStore.shift();
-      }
+
+      await sql`
+        INSERT INTO rtc_signals (id, chat_id, sender_id, target_id, call_id, content)
+        VALUES (${uuid()}, ${req.params.id}, ${req.user.id}, ${targetId},
+                ${sig.callId || null}, ${content})
+      `;
+      // Bersihkan sinyal lama agar tabel tidak membengkak
+      await sql`DELETE FROM rtc_signals WHERE created_at < NOW() - INTERVAL '10 minutes'`;
+
       return res.status(201).json({
         message: {
-          id: `rtc_${Date.now()}`, chat_id: req.params.id,
-          sender_id: req.user.id, type: 'text', content,
-          created_at: new Date().toISOString(), reactions: {}
+          id: `rtc_${Date.now()}`,
+          chat_id: req.params.id,
+          sender_id: req.user.id,
+          type: 'text',
+          content,
+          created_at: new Date().toISOString(),
+          reactions: {}
         }
       });
     }
@@ -274,8 +333,8 @@ router.post('/:id/messages', auth, async (req, res) => {
     RETURNING *
   `;
 
-  // Update chat meta + increment unread for partner
-  const isP1 = c.participant1_id === req.user.id;
+  /* Update chat meta + increment unread for partner */
+  const isP1   = c.participant1_id === req.user.id;
   const preview = content || caption || `[${type}]`;
   if (isP1) {
     await sql`
@@ -295,46 +354,117 @@ router.post('/:id/messages', auth, async (req, res) => {
     `;
   }
 
-  res.status(201).json({ message: { ...msg, reactions: {} } });
-});
+  const [sender] = await sql`SELECT name, photo_url FROM users WHERE id = ${req.user.id}`;
+  const message = {
+    ...msg,
+    sender_name:  sender?.name || req.user.name,
+    sender_photo: sender?.photo_url || '',
+    reactions:    {}
+  };
 
-/* ── Delete message ── */
-router.delete('/:chatId/messages/:msgId', auth, async (req, res) => {
-  const [msg] = await sql`SELECT * FROM messages WHERE id = ${req.params.msgId}`;
+  emitTo(req, `chat:${req.params.id}`, 'message:new', { chatId: req.params.id, message });
+  emitTo(req, `chat:${req.params.id}`, 'chat:updated', { chatId: req.params.id });
+
+  res.status(201).json({ message });
+}));
+
+/* ════════════════════════════════════════
+   DELETE MESSAGE
+════════════════════════════════════════ */
+router.delete('/:chatId/messages/:msgId', auth, ah(async (req, res) => {
+  const { chatId, msgId } = req.params;
+
+  const [msg] = await sql`
+    SELECT * FROM messages WHERE id = ${msgId} AND chat_id = ${chatId}
+  `;
   if (!msg) return res.status(404).json({ error: 'Pesan tidak ditemukan' });
-  if (msg.sender_id !== req.user.id) return res.status(403).json({ error: 'Hanya bisa hapus pesan sendiri' });
+  if (msg.sender_id !== req.user.id) {
+    return res.status(403).json({ error: 'Hanya bisa hapus pesan sendiri' });
+  }
 
-  await sql`UPDATE messages SET is_deleted = TRUE WHERE id = ${req.params.msgId}`;
+  await sql`
+    UPDATE messages SET is_deleted = TRUE, deleted_at = NOW() WHERE id = ${msgId}
+  `;
+  emitTo(req, `chat:${chatId}`, 'message:deleted', { chatId, msgId });
   res.json({ ok: true });
-});
+}));
 
-/* ── Clear all messages ── */
-router.delete('/:id/messages', auth, async (req, res) => {
+/* ════════════════════════════════════════
+   CLEAR ALL MESSAGES
+════════════════════════════════════════ */
+router.delete('/:id/messages', auth, ah(async (req, res) => {
   const c = await assertParticipant(req.params.id, req.user.id, res);
   if (!c) return;
 
-  await sql`UPDATE messages SET is_deleted = TRUE WHERE chat_id = ${req.params.id}`;
-  await sql`UPDATE chats SET last_message = '', last_message_at = NOW() WHERE id = ${req.params.id}`;
+  await sql`
+    UPDATE messages SET is_deleted = TRUE, deleted_at = NOW()
+    WHERE chat_id = ${req.params.id} AND is_deleted = FALSE
+  `;
+  await sql`
+    UPDATE chats SET last_message = '', last_message_at = NOW()
+    WHERE id = ${req.params.id}
+  `;
+  emitTo(req, `chat:${req.params.id}`, 'chat:cleared', { chatId: req.params.id });
   res.json({ ok: true });
-});
+}));
 
-/* ── Add / update reaction ── */
-router.patch('/:chatId/messages/:msgId/reactions', auth, async (req, res) => {
-  const { emoji } = req.body;
+/* ════════════════════════════════════════
+   REACTIONS (toggle: klik emoji sama = hapus)
+════════════════════════════════════════ */
+router.patch('/:chatId/messages/:msgId/reactions', auth, ah(async (req, res) => {
+  const { chatId, msgId } = req.params;
+  const { emoji } = req.body || {};
   if (!emoji) return res.status(400).json({ error: 'emoji diperlukan' });
 
-  await sql`
-    INSERT INTO reactions (message_id, user_id, emoji)
-    VALUES (${req.params.msgId}, ${req.user.id}, ${emoji})
-    ON CONFLICT (message_id, user_id) DO UPDATE SET emoji = ${emoji}
-  `;
-  res.json({ ok: true });
-});
+  const c = await assertParticipant(chatId, req.user.id, res);
+  if (!c) return;
 
-/* ── Typing indicator via REST (WebSocket lebih baik, ini fallback) ── */
-router.post('/:id/typing', auth, (req, res) => {
-  // Handled di Socket.io, ini hanya 200 OK
+  const [msg] = await sql`
+    SELECT id FROM messages WHERE id = ${msgId} AND chat_id = ${chatId}
+  `;
+  if (!msg) return res.status(404).json({ error: 'Pesan tidak ditemukan' });
+
+  const [existing] = await sql`
+    SELECT emoji FROM reactions WHERE message_id = ${msgId} AND user_id = ${req.user.id}
+  `;
+
+  let action;
+  if (existing && existing.emoji === emoji) {
+    await sql`
+      DELETE FROM reactions
+      WHERE message_id = ${msgId} AND user_id = ${req.user.id}
+    `;
+    action = 'removed';
+  } else if (existing) {
+    await sql`
+      UPDATE reactions SET emoji = ${emoji}, updated_at = NOW()
+      WHERE message_id = ${msgId} AND user_id = ${req.user.id}
+    `;
+    action = 'updated';
+  } else {
+    await sql`
+      INSERT INTO reactions (message_id, user_id, emoji)
+      VALUES (${msgId}, ${req.user.id}, ${emoji})
+    `;
+    action = 'added';
+  }
+
+  const map = await reactionMapFor([msgId]);
+  const reactions = map[msgId] || {};
+
+  emitTo(req, `chat:${chatId}`, 'message:reacted', { chatId, msgId, reactions });
+  res.json({ ok: true, action, reactions });
+}));
+
+/* ════════════════════════════════════════
+   TYPING (fallback REST untuk polling)
+════════════════════════════════════════ */
+router.post('/:id/typing', auth, ah(async (req, res) => {
+  const c = await assertParticipant(req.params.id, req.user.id, res);
+  if (!c) return;
+
+  setTyping(req.params.id, req.user.id, req.user.name, req.body?.typing !== false);
   res.json({ ok: true });
-});
+}));
 
 module.exports = router;
