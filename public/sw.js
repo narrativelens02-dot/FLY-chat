@@ -4,7 +4,7 @@
    - Push notification support
 ===================================================== */
 
-const CACHE_NAME = 'flychat-v2';
+const CACHE_NAME = 'flychat-v3';
 const CACHE_URLS = [
   '/',
   '/index.html',

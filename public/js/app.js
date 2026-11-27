@@ -66,6 +66,14 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 function setupFormListeners() {
+  /* ── Unduh dokumen (mendukung file besar per potongan) ── */
+  document.addEventListener('click', e => {
+    const link = e.target.closest && e.target.closest('.msg-file-dl');
+    if (!link) return;
+    e.preventDefault();
+    downloadFileChunked(link.getAttribute('href'), link.getAttribute('download') || 'file');
+  });
+
   /* ── Register ── */
   const regForm = el('register-form');
   if (regForm) regForm.addEventListener('submit', async e => {
@@ -1091,6 +1099,47 @@ function markMessageDeleted(msgId) {
   if (bubble) bubble.innerHTML = '<em class="msg-deleted">Pesan telah dihapus</em>';
 }
 
+/* Unduh file besar per potongan (server membatasi ukuran tiap respons) */
+window.downloadFileChunked = async function(url, name) {
+  const t = showPersistentToast('Mengunduh…');
+  try {
+    const head = await fetch(url, { method: 'HEAD' });
+    if (!head.ok) throw new Error('HTTP ' + head.status);
+    const total = Number(head.headers.get('X-File-Size')) || 0;
+
+    // Bukan file database (Cloudinary/disk) → unduh langsung
+    if (!total) {
+      hideToast(t);
+      window.open(url, '_blank', 'noopener');
+      return;
+    }
+
+    const CH = 2 * 1024 * 1024;
+    const parts = [];
+    for (let start = 0; start < total; start += CH) {
+      const end = Math.min(total - 1, start + CH - 1);
+      const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+      if (!res.ok && res.status !== 206) throw new Error('HTTP ' + res.status);
+      parts.push(await res.arrayBuffer());
+      t.textContent = `Mengunduh ${Math.min(100, Math.round(((start + CH) / total) * 100))}%…`;
+    }
+
+    const blob = new Blob(parts);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name || 'file';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    hideToast(t);
+    showToast('Unduhan dimulai', 'success');
+  } catch (err) {
+    hideToast(t);
+    showToast('Gagal mengunduh: ' + err.message, 'error');
+  }
+};
+
 function buildMsgContent(msg) {
   if (msg.is_deleted) return '<em class="msg-deleted">Pesan telah dihapus</em>';
 
@@ -1232,38 +1281,136 @@ window.handleFileSelect = async function(input, type) {
   else await uploadAndSend(file, type);
 };
 
+/* Batas sekali kirim; file lebih besar otomatis dipecah per 2 MB */
+const UPLOAD_SINGLE_MAX = 2 * 1024 * 1024;
+const UPLOAD_MAX_MB = 50;
+let _uploadInfoPromise = null;
+
+function getUploadInfo() {
+  if (!_uploadInfoPromise) {
+    _uploadInfoPromise = apiGet('/api/upload/info').catch(() => ({
+      singleMax: UPLOAD_SINGLE_MAX,
+      chunkSize: UPLOAD_SINGLE_MAX
+    }));
+  }
+  return _uploadInfoPromise;
+}
+
+/* Kompres gambar di browser supaya cepat & hemat kuota */
+async function compressImageForUpload(file, maxDim = 1600, targetBytes = 1.6 * 1024 * 1024) {
+  if (!file.type || !file.type.startsWith('image/')) return file;
+  if (file.type === 'image/gif' || file.type === 'image/svg+xml') return file;
+  if (file.size <= Math.min(targetBytes, 640 * 1024)) return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    let scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    let quality = 0.86;
+
+    for (let i = 0; i < 8; i++) {
+      const w = Math.max(1, Math.round(bitmap.width * scale));
+      const h = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(bitmap, 0, 0, w, h);
+
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+      if (!blob) break;
+      if (blob.size <= targetBytes || (w <= 320 && h <= 320)) {
+        bitmap.close?.();
+        const base = (file.name || 'foto').replace(/\.[^.]+$/, '');
+        return new File([blob], base + '.jpg', { type: 'image/jpeg', lastModified: Date.now() });
+      }
+      if (i < 4) quality = Math.max(0.45, quality - 0.12);
+      else scale *= 0.75;
+    }
+    bitmap.close?.();
+  } catch { /* biarkan file asli bila browser tidak mendukung */ }
+  return file;
+}
+
+/* XHR agar progres unggah tetap terlihat */
+function xhrUpload(path, formData, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.error || `Upload gagal (HTTP ${xhr.status})`));
+    };
+    xhr.onerror = () => reject(new Error('Koneksi terputus saat mengunggah'));
+    xhr.ontimeout = () => reject(new Error('Upload timeout, coba lagi'));
+    xhr.timeout = 120000;
+    xhr.open('POST', `${API}${path}`);
+    xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('fc_token')}`);
+    xhr.send(formData);
+  });
+}
+
+/* Unggah file: sekali kirim bila di bawah batas, chunked bila besar (video/dokumen) */
+async function uploadChatFile(file, onProgress) {
+  const info = await getUploadInfo();
+  const singleMax = info?.singleMax || UPLOAD_SINGLE_MAX;
+
+  if (file.size <= singleMax) {
+    const fd = new FormData();
+    fd.append('file', file);
+    return xhrUpload('/api/upload/file', fd, onProgress);
+  }
+
+  const init = await apiPost('/api/upload/init', {
+    file_name: file.name || 'file',
+    mime_type: file.type || 'application/octet-stream',
+    file_size: file.size,
+    kind: 'chat'
+  });
+
+  const chunkSize = init.chunk_size || UPLOAD_SINGLE_MAX;
+  const total = init.chunk_count || Math.ceil(file.size / chunkSize);
+
+  for (let i = 0; i < total; i++) {
+    const part = file.slice(i * chunkSize, Math.min(file.size, (i + 1) * chunkSize));
+    const fd = new FormData();
+    fd.append('upload_id', init.upload_id);
+    fd.append('index', String(i));
+    fd.append('chunk', part, 'chunk');
+    await xhrUpload('/api/upload/chunk', fd, null);
+    if (onProgress) onProgress((i + 1) / total);
+  }
+
+  return apiPost('/api/upload/complete', { upload_id: init.upload_id });
+}
+
 async function uploadAndSend(file, type, caption = '') {
   const target = currentChatTarget();
   if (!target) { showToast('Pilih percakapan dulu', 'error'); return; }
-  const MAX = type === 'video' ? 100 : 50;
-  if (file.size > MAX * 1024 * 1024) { showToast(`File terlalu besar (maks ${MAX}MB)`, 'error'); return; }
+  if (file.size > UPLOAD_MAX_MB * 1024 * 1024) {
+    showToast(`File terlalu besar (maks ${UPLOAD_MAX_MB}MB)`, 'error');
+    return;
+  }
 
-  const toastEl = showPersistentToast('Mengunggah 0%…');
+  const toastEl = showPersistentToast('Menyiapkan file…');
   try {
-    // Upload file
-    const formData = new FormData();
-    formData.append('file', file);
-    const xhr = new XMLHttpRequest();
-    const uploadResult = await new Promise((res, rej) => {
-      xhr.upload.onprogress = e => {
-        if (e.lengthComputable)
-          toastEl.textContent = `Mengunggah ${Math.round(e.loaded/e.total*100)}%…`;
-      };
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) res(JSON.parse(xhr.responseText));
-        else rej(new Error(JSON.parse(xhr.responseText).error || 'Upload gagal'));
-      };
-      xhr.onerror = () => rej(new Error('Network error'));
-      xhr.open('POST', `${API}/api/upload/file`);
-      xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('fc_token')}`);
-      xhr.send(formData);
+    const prepared = type === 'image' ? await compressImageForUpload(file) : file;
+
+    toastEl.textContent = 'Mengunggah 0%…';
+    const uploadResult = await uploadChatFile(prepared, pct => {
+      toastEl.textContent = `Mengunggah ${Math.min(100, Math.round(pct * 100))}%…`;
     });
 
     const msgPayload = {
       type,
-      content:   caption || `[${type === 'image' ? '📷 Foto' : type === 'video' ? '🎥 Video' : '📄 ' + file.name}]`,
+      content:   caption || `[${type === 'image' ? '📷 Foto' : type === 'video' ? '🎥 Video' : '📄 ' + (prepared.name || file.name)}]`,
       file_url:  uploadResult.fileURL,
-      file_name: uploadResult.fileName,
+      file_name: uploadResult.fileName || prepared.name || file.name,
       file_size: uploadResult.fileSize,
       caption
     };
@@ -1313,35 +1460,81 @@ function showMediaPreview(file, type) {
 /* ════════════════════════════════════════
    LOCATION
 ════════════════════════════════════════ */
-window.shareLocation = function() {
-  el('attach-menu').classList.add('hidden');
+function getCurrentPositionWithFallback() {
+  return new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      resolve,
+      err => {
+        // Jika ditolak user (code 1), jangan retry
+        if (err.code === 1) return reject(err);
+        // Fallback ke akurasi standar (Wi-Fi / seluler) jika GPS lambat/tidak tersedia
+        navigator.geolocation.getCurrentPosition(
+          resolve,
+          reject,
+          { timeout: 15000, enableHighAccuracy: false, maximumAge: 300000 }
+        );
+      },
+      { timeout: 10000, enableHighAccuracy: true, maximumAge: 60000 }
+    );
+  });
+}
+
+window.shareLocation = async function() {
+  el('attach-menu')?.classList.add('hidden');
   if (!currentChatId && !currentGroupId) { showToast('Pilih percakapan dulu', 'error'); return; }
-  if (!navigator.geolocation) { showToast('Geolokasi tidak didukung', 'error'); return; }
+  if (!navigator.geolocation) { showToast('Perangkat ini tidak mendukung geolokasi', 'error'); return; }
+  if (!window.isSecureContext) {
+    showToast('Lokasi hanya bisa dibagikan lewat HTTPS (bukan http://IP-lokal)', 'error');
+    return;
+  }
+
   const target = currentChatTarget();
   const t = showPersistentToast('📍 Mendapatkan lokasi...');
-  navigator.geolocation.getCurrentPosition(async pos => {
+
+  try {
+    const pos = await getCurrentPositionWithFallback();
     const { latitude: lat, longitude: lng } = pos.coords;
     let locationName = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-    try {
-      const res  = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=id`);
-      const data = await res.json();
-      if (data.display_name) locationName = data.display_name.split(',').slice(0,3).join(', ');
-    } catch {}
 
-    const payload = { type: 'location', content: `📍 ${locationName}`, lat, lng, location_name: locationName };
-    if (replyingTo) { payload.reply_to_id = replyingTo.id; payload.reply_to_sender = replyingTo.senderName; payload.reply_to_text = replyingTo.text; }
+    // Reverse geocoding boleh gagal — lokasi tetap dikirim dengan koordinat
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 5000);
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=id`,
+        { signal: ctrl.signal }
+      );
+      clearTimeout(timer);
+      const data = await res.json();
+      if (data.display_name) locationName = data.display_name.split(',').slice(0, 3).join(', ');
+    } catch { /* pakai koordinat saja */ }
+
+    if (t) t.textContent = '📍 Mengirim lokasi...';
+    const payload = {
+      type: 'location',
+      content: `📍 ${locationName}`,
+      lat, lng,
+      location_name: locationName
+    };
+    if (replyingTo) {
+      payload.reply_to_id = replyingTo.id;
+      payload.reply_to_sender = replyingTo.senderName;
+      payload.reply_to_text = replyingTo.text;
+    }
     cancelReply();
 
-    try {
-      await postChatMessage(payload, `📍 ${locationName}`, target);
-      hideToast(t);
-      showToast('Lokasi dibagikan!', 'success');
-    } catch (err) {
-      hideToast(t);
-      showToast('Gagal: ' + err.message, 'error');
-    }
-  }, err => { hideToast(t); showToast('Lokasi gagal: ' + err.message, 'error'); },
-  { timeout: 10000, enableHighAccuracy: true });
+    await postChatMessage(payload, `📍 ${locationName}`, target);
+    hideToast(t);
+    showToast('Lokasi dibagikan!', 'success');
+  } catch (err) {
+    hideToast(t);
+    let msg;
+    if (err.code === 1)      msg = 'Izin lokasi ditolak. Aktifkan izin lokasi untuk situs ini di pengaturan browser.';
+    else if (err.code === 2) msg = 'Lokasi tidak tersedia. Pastikan GPS/lokasi perangkat aktif.';
+    else if (err.code === 3) msg = 'Gagal mendapatkan lokasi (timeout). Coba lagi.';
+    else                     msg = 'Gagal mengirim lokasi: ' + (err.message || 'Unknown error');
+    showToast(msg, 'error');
+  }
 };
 
 /* ════════════════════════════════════════
@@ -1574,31 +1767,32 @@ window.triggerAvatarUpload = function() { el('avatar-upload').click(); };
 
 window.uploadAvatar = async function(input) {
   const file = input.files[0];
+  input.value = '';
   if (!file || !file.type.startsWith('image/')) { showToast('Pilih file gambar', 'error'); return; }
-  if (file.size > 5 * 1024 * 1024) { showToast('Gambar terlalu besar (maks 5MB)', 'error'); return; }
+  if (file.size > 15 * 1024 * 1024) { showToast('Gambar terlalu besar (maks 15MB)', 'error'); return; }
 
   const progress = el('profile-upload-progress');
   const bar      = el('avatar-progress-bar');
   progress.classList.remove('hidden');
-
-  const formData = new FormData();
-  formData.append('avatar', file);
-  const xhr = new XMLHttpRequest();
-  xhr.upload.onprogress = e => { if (e.lengthComputable) bar.style.width = Math.round(e.loaded/e.total*100) + '%'; };
+  bar.style.width = '10%';
 
   try {
-    const result = await new Promise((res, rej) => {
-      xhr.onload = () => xhr.status < 300 ? res(JSON.parse(xhr.responseText)) : rej(new Error(JSON.parse(xhr.responseText).error));
-      xhr.onerror = () => rej(new Error('Network error'));
-      xhr.open('POST', `${API}/api/upload/avatar`);
-      xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('fc_token')}`);
-      xhr.send(formData);
+    // Perkecil foto profil agar cepat & selalu di bawah batas server
+    const prepared = await compressImageForUpload(file, 512, 900 * 1024);
+    bar.style.width = '35%';
+
+    const formData = new FormData();
+    formData.append('avatar', prepared);
+    const result = await xhrUpload('/api/upload/avatar', formData, pct => {
+      bar.style.width = Math.round(35 + pct * 65) + '%';
     });
     await apiPatch('/api/users/me', { photo_url: result.photoURL });
     const paEl = el('profile-avatar-img');
     const saEl = el('sidebar-avatar');
+    const naEl = el('nav-user-avatar');
     if (paEl) paEl.src = result.photoURL;
     if (saEl) saEl.src = result.photoURL;
+    if (naEl) naEl.src = result.photoURL;
     currentUser.photo_url = result.photoURL;
     showToast('Foto profil diperbarui! ✓', 'success');
   } catch (err) {

@@ -90,6 +90,7 @@ app.use('/api/users',  require('./routes/users'));
 app.use('/api/chats',  require('./routes/chats'));
 app.use('/api/groups', require('./routes/groups'));
 app.use('/api/upload', require('./routes/upload'));
+app.use('/api/files',  require('./routes/files'));
 
 /* Health check */
 app.get('/api/health', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));

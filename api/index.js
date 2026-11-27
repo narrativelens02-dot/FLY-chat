@@ -40,8 +40,9 @@ app.use('/api/users',  require('../server/routes/users'));
 app.use('/api/chats',  require('../server/routes/chats'));
 app.use('/api/groups', require('../server/routes/groups'));
 
-/* Upload — Cloudinary support di Vercel (tidak ada disk write) */
+/* Upload — Cloudinary atau penyimpanan database (Vercel tidak bisa disk write) */
 app.use('/api/upload', require('../server/routes/upload'));
+app.use('/api/files',  require('../server/routes/files'));
 
 /* Health check */
 app.get('/api/health', (req, res) => res.json({

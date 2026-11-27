@@ -3,11 +3,16 @@
  * FLYchat — File Upload Route
  *
  * Mode otomatis:
- *   - Jika CLOUDINARY_* tersedia → upload ke Cloudinary v2 (persistent)
- *   - Jika tidak             → fallback ke disk lokal
+ *   1. CLOUDINARY_* tersedia  → Cloudinary v2 (paling disarankan, tanpa batas kecil)
+ *   2. Serverless (Vercel)    → simpan di database Neon (chunked, aman limit 4,5 MB)
+ *   3. Selain itu             → disk lokal (uploads/)
  *
- * Cloudinary upload menggunakan multer memoryStorage + upload_stream
- * (tanpa multer-storage-cloudinary yang tidak support cloudinary v2)
+ * Endpoint database:
+ *   POST /api/upload/file      → unggah kecil (≤2 MB) sekali kirim
+ *   POST /api/upload/avatar    → foto profil (≤2 MB, dikompres di klien)
+ *   POST /api/upload/init      → mulai unggah besar (video/dokumen)
+ *   POST /api/upload/chunk     → kirim potongan (≤2 MB per request)
+ *   POST /api/upload/complete  → selesaikan unggah
  */
 const router   = require('express').Router();
 const multer   = require('multer');
@@ -15,6 +20,9 @@ const path     = require('path');
 const fs       = require('fs');
 const { v4: uuid } = require('uuid');
 const auth     = require('../middleware/auth');
+const { sql }  = require('../db');
+const { ah }   = require('../utils');
+const { CHUNK_MB, CHUNK_BYTES } = require('../fileStore');
 
 /* ─── Deteksi mode ─────────────────────────── */
 const USE_CLOUDINARY = !!(
@@ -29,6 +37,8 @@ const IS_SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_N
 
 const BLOCKED_EXT  = ['.exe','.bat','.sh','.cmd','.ps1','.js','.php','.py','.rb','.pl'];
 const MAX_MB       = parseInt(process.env.MAX_FILE_SIZE_MB || '50');
+const MAX_BYTES    = MAX_MB * 1024 * 1024;
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 
 /* ═══════════════════════════════════════════
    CLOUDINARY MODE — multer memoryStorage +
@@ -106,12 +116,11 @@ function buildCloudinaryRoutes(router) {
     if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
     try {
       const result = await uploadToCloudinary(req.file.buffer, {
-        folder:         'flychat/avatars',
-        resource_type:  'image',
-        public_id:      `${Date.now()}_${uuid()}`,
-        transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face', quality: 'auto' }]
+        folder: 'flychat/avatars',
+        resource_type: 'image',
+        public_id: `avatar_${req.user.id}_${Date.now()}`,
+        transformation: [{ width: 400, height: 400, crop: 'fill', gravity: 'face' }]
       });
-
       res.json({ photoURL: result.secure_url, storage: 'cloudinary' });
     } catch (err) {
       console.error('Cloudinary avatar error:', err.message);
@@ -120,6 +129,177 @@ function buildCloudinaryRoutes(router) {
   });
 
   console.log('☁️  Upload mode: Cloudinary v2 (memory stream)');
+}
+
+/* ═══════════════════════════════════════════
+   DATABASE MODE — fallback serverless tanpa Cloudinary
+═══════════════════════════════════════════ */
+function buildDatabaseRoutes(router) {
+  const chunkMulter = multer({
+    storage: multer.memoryStorage(),
+    limits:  { fileSize: CHUNK_BYTES },
+    fileFilter: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      if (BLOCKED_EXT.includes(ext)) return cb(new Error(`Tipe file ${ext} tidak diizinkan`));
+      cb(null, true);
+    }
+  });
+
+  const avatarMulter = multer({
+    storage: multer.memoryStorage(),
+    limits:  { fileSize: AVATAR_MAX_BYTES },
+    fileFilter: (req, file, cb) => {
+      if (!file.mimetype.startsWith('image/')) return cb(new Error('Hanya file gambar yang diizinkan'));
+      cb(null, true);
+    }
+  });
+
+  async function storeChunk(fileId, idx, buffer) {
+    const hex = buffer.toString('hex');
+    await sql`
+      INSERT INTO uploaded_file_chunks (file_id, idx, data)
+      VALUES (${fileId}, ${idx}, decode(${hex}, 'hex'))
+      ON CONFLICT (file_id, idx) DO UPDATE SET data = decode(${hex}, 'hex')
+    `;
+  }
+
+  async function createFile(ownerId, kind, name, mime, size, chunkCount, status) {
+    const id = uuid();
+    const [row] = await sql`
+      INSERT INTO uploaded_files
+        (id, owner_id, kind, file_name, mime_type, file_size, chunk_count, status)
+      VALUES
+        (${id}, ${ownerId}, ${kind}, ${name || 'file'},
+         ${mime || 'application/octet-stream'}, ${size}, ${chunkCount}, ${status})
+      RETURNING *
+    `;
+    return row;
+  }
+
+  function toResponse(row) {
+    const url = `/api/files/${row.id}`;
+    return {
+      fileURL:  url,
+      photoURL: url,
+      fileName: row.file_name,
+      fileSize: formatSize(Number(row.file_size)),
+      mimeType: row.mime_type,
+      storage:  'database'
+    };
+  }
+
+  /* Unggah kecil (≤1 chunk) */
+  router.post('/file', auth, chunkMulter.single('file'), ah(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
+    const row = await createFile(
+      req.user.id, 'chat',
+      req.file.originalname || 'file',
+      req.file.mimetype,
+      req.file.size, 1, 'ready'
+    );
+    await storeChunk(row.id, 0, req.file.buffer);
+    res.json(toResponse(row));
+  }));
+
+  /* Foto profil */
+  router.post('/avatar', auth, avatarMulter.single('avatar'), ah(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
+    const row = await createFile(
+      req.user.id, 'avatar',
+      req.file.originalname || 'avatar',
+      req.file.mimetype,
+      req.file.size, 1, 'ready'
+    );
+    await storeChunk(row.id, 0, req.file.buffer);
+    res.json({ photoURL: `/api/files/${row.id}`, storage: 'database' });
+  }));
+
+  /* Mulai unggah besar */
+  router.post('/init', auth, ah(async (req, res) => {
+    const { file_name = 'file', mime_type = 'application/octet-stream', file_size, kind = 'chat' } = req.body || {};
+    const size = Number(file_size);
+    if (!Number.isFinite(size) || size <= 0) {
+      return res.status(400).json({ error: 'Ukuran file tidak valid' });
+    }
+    if (size > MAX_BYTES) {
+      return res.status(413).json({ error: `File terlalu besar (maks ${MAX_MB}MB)` });
+    }
+    const ext = path.extname(String(file_name)).toLowerCase();
+    if (BLOCKED_EXT.includes(ext)) {
+      return res.status(400).json({ error: `Tipe file ${ext} tidak diizinkan` });
+    }
+
+    /* Bersihkan unggahan yang tidak pernah diselesaikan */
+    await sql`DELETE FROM uploaded_files WHERE status = 'pending' AND created_at < NOW() - INTERVAL '1 day'`.catch(() => {});
+
+    const chunkCount = Math.max(1, Math.ceil(size / CHUNK_BYTES));
+    const row = await createFile(
+      req.user.id,
+      kind === 'avatar' ? 'avatar' : 'chat',
+      String(file_name), String(mime_type), size, chunkCount, 'pending'
+    );
+
+    res.json({
+      upload_id:  row.id,
+      chunk_size: CHUNK_BYTES,
+      chunk_mb:   CHUNK_MB,
+      chunk_count: chunkCount
+    });
+  }));
+
+  /* Kirim satu potongan */
+  router.post('/chunk', auth, chunkMulter.single('chunk'), ah(async (req, res) => {
+    const { upload_id, index } = req.body || {};
+    if (!upload_id || index === undefined) {
+      return res.status(400).json({ error: 'upload_id dan index wajib diisi' });
+    }
+    if (!req.file) return res.status(400).json({ error: 'Potongan file kosong' });
+
+    const idx = Number(index);
+    const [file] = await sql`
+      SELECT id, owner_id, chunk_count, status FROM uploaded_files WHERE id = ${upload_id}
+    `;
+    if (!file || file.owner_id !== req.user.id) {
+      return res.status(404).json({ error: 'Upload tidak ditemukan' });
+    }
+    if (file.status !== 'pending') {
+      return res.status(409).json({ error: 'Upload sudah diselesaikan' });
+    }
+    if (!Number.isInteger(idx) || idx < 0 || idx >= file.chunk_count) {
+      return res.status(400).json({ error: 'Index potongan tidak valid' });
+    }
+
+    await storeChunk(upload_id, idx, req.file.buffer);
+    res.json({ ok: true, index: idx });
+  }));
+
+  /* Selesaikan unggahan */
+  router.post('/complete', auth, ah(async (req, res) => {
+    const { upload_id } = req.body || {};
+    if (!upload_id) return res.status(400).json({ error: 'upload_id wajib diisi' });
+
+    const [file] = await sql`SELECT * FROM uploaded_files WHERE id = ${upload_id}`;
+    if (!file || file.owner_id !== req.user.id) {
+      return res.status(404).json({ error: 'Upload tidak ditemukan' });
+    }
+    if (file.status === 'ready') return res.json(toResponse(file));
+
+    const [count] = await sql`
+      SELECT COUNT(*)::int AS c FROM uploaded_file_chunks WHERE file_id = ${upload_id}
+    `;
+    if (count.c !== file.chunk_count) {
+      return res.status(400).json({
+        error: `Potongan file belum lengkap (${count.c}/${file.chunk_count})`
+      });
+    }
+
+    const [row] = await sql`
+      UPDATE uploaded_files SET status = 'ready' WHERE id = ${upload_id} RETURNING *
+    `;
+    res.json(toResponse(row));
+  }));
+
+  console.log('🗄️  Upload mode: Database Neon (chunked, aman untuk Vercel)');
 }
 
 /* ═══════════════════════════════════════════
@@ -183,28 +363,44 @@ function buildLocalRoutes(router) {
 /* ─── Init ──────────────────────────────── */
 if (USE_CLOUDINARY) {
   buildCloudinaryRoutes(router);
+  if (IS_SERVERLESS) {
+    /* Fallback chunked DB untuk file > 4MB di Vercel meski Cloudinary aktif */
+    buildDatabaseRoutes(router);
+  }
 } else if (IS_SERVERLESS) {
-  /* Vercel tanpa Cloudinary — kembalikan error yang jelas */
-  console.warn('⚠️  Upload mode: DISABLED (serverless tanpa Cloudinary). Isi CLOUDINARY_* di env vars.');
-  router.post('/file',   auth, (req, res) => res.status(501).json({
-    error: 'Upload tidak tersedia. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET di Vercel Environment Variables.'
-  }));
-  router.post('/avatar', auth, (req, res) => res.status(501).json({
-    error: 'Upload tidak tersedia. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET di Vercel Environment Variables.'
-  }));
+  buildDatabaseRoutes(router);
 } else {
   buildLocalRoutes(router);
 }
 
 /* Info endpoint */
 router.get('/info', auth, (req, res) => {
-  res.json({ mode: USE_CLOUDINARY ? 'cloudinary' : 'local', maxSize: `${MAX_MB}MB` });
+  const mode = USE_CLOUDINARY ? 'cloudinary' : IS_SERVERLESS ? 'database' : 'local';
+  const singleMax = mode === 'local'
+    ? MAX_BYTES
+    : (mode === 'cloudinary' && !IS_SERVERLESS)
+      ? MAX_BYTES
+      : (mode === 'cloudinary' ? 4 * 1024 * 1024 : CHUNK_BYTES);
+  res.json({
+    mode,
+    maxSize: `${MAX_MB}MB`,
+    maxBytes: MAX_BYTES,
+    avatarMaxSize: `${Math.round(AVATAR_MAX_BYTES / 1024 / 1024)}MB`,
+    chunkSize: CHUNK_BYTES,
+    chunkMb: CHUNK_MB,
+    singleMax
+  });
 });
 
 /* Error handler multer */
 router.use((err, req, res, next) => {
-  if (err) return res.status(400).json({ error: err.message });
-  next();
+  if (!err) return next();
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      error: `File terlalu besar. Maksimal ${CHUNK_MB}MB per unggahan; file lebih besar dikirim otomatis per potongan.`
+    });
+  }
+  return res.status(400).json({ error: err.message });
 });
 
 function formatSize(b) {

@@ -2641,3 +2641,42 @@ body {
   transition: background .15s;
 }
 .group-edit-btn:hover { background: var(--primary-muted); color: var(--primary); }
+
+/* -------------------------------------------
+   TINGGI DINAMIS & SAFE AREA (MOBILE)
+   Memperbaiki taskbar yang tertutup UI browser
+------------------------------------------- */
+@supports (height: 100dvh) {
+  body,
+  .screen,
+  .home-layout,
+  .profile-layout { height: 100dvh; }
+  .auth-wrapper { min-height: 100dvh; }
+}
+
+/* Taskbar tidak boleh tertutup gesture bar / home indicator */
+.bottom-taskbar {
+  padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+}
+
+.message-input-area {
+  padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+}
+
+@media (max-width: 768px) {
+  html, body, .screen, .home-layout, .profile-layout { height: 100%; height: 100dvh; }
+  .sidebar { height: 100%; max-height: 100%; min-height: 0; overflow: hidden; }
+  .sidebar-header, .search-box { flex-shrink: 0; }
+  .nav-section-container { flex: 1 1 0; min-height: 0; overflow: hidden; }
+  .bottom-taskbar {
+    flex-shrink: 0;
+    position: relative;
+    z-index: 15;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Beri ruang untuk notch / status bar pada layar penuh */
+  .sidebar-header { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+  .chat-header,
+  .profile-header { padding-top: calc(4px + env(safe-area-inset-top, 0px)); }
+}

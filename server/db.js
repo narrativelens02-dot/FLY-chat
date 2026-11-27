@@ -173,6 +173,29 @@ async function initDB() {
     )
   `;
 
+  /* ─── Penyimpanan file di database (fallback Vercel tanpa Cloudinary) ─── */
+  await sql`
+    CREATE TABLE IF NOT EXISTS uploaded_files (
+      id          TEXT PRIMARY KEY,
+      owner_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
+      kind        TEXT NOT NULL DEFAULT 'chat',
+      file_name   TEXT NOT NULL DEFAULT '',
+      mime_type   TEXT NOT NULL DEFAULT 'application/octet-stream',
+      file_size   BIGINT NOT NULL DEFAULT 0,
+      chunk_count INTEGER NOT NULL DEFAULT 1,
+      status      TEXT NOT NULL DEFAULT 'ready',
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS uploaded_file_chunks (
+      file_id TEXT NOT NULL REFERENCES uploaded_files(id) ON DELETE CASCADE,
+      idx     INTEGER NOT NULL,
+      data    BYTEA NOT NULL,
+      PRIMARY KEY (file_id, idx)
+    )
+  `;
+
   /* Migrasi kolom tambahan untuk tabel lama */
   await sql`ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`;
   await sql`ALTER TABLE reactions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`;
@@ -188,6 +211,8 @@ async function initDB() {
   await sql`CREATE INDEX IF NOT EXISTS idx_group_reactions_message ON chat_group_reactions(message_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_rtc_signals_target ON rtc_signals(target_id, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_rtc_signals_chat ON rtc_signals(chat_id, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_uploaded_files_owner ON uploaded_files(owner_id, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_uploaded_files_pending ON uploaded_files(status, created_at)`;
 
   console.log('✅ Database schema ready');
 }
