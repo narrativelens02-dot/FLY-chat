@@ -19,11 +19,13 @@ FLYchat/
 │   ├── index.js          ← Express + Socket.io server
 │   ├── db.js             ← Neon Postgres + auto schema migration
 │   ├── mailer.js         ← Nodemailer SMTP helper + email templates
+│   ├── utils.js          ← Helper async-error wrapper + emit Socket.io
 │   ├── routes/
 │   │   ├── auth.js       ← Register, Login, Google, Me, Logout,
 │   │   │                    ForgotPassword, ResetPassword (lengkap)
 │   │   ├── users.js      ← Profile, Contacts, Search, Presence
-│   │   ├── chats.js      ← CRUD chats & messages, reactions
+│   │   ├── chats.js      ← CRUD chats & messages, reactions, RTC signaling
+│   │   ├── groups.js     ← CRUD grup, anggota, pesan grup, reaksi grup
 │   │   └── upload.js     ← Upload (Cloudinary atau disk lokal)
 │   └── middleware/
 │       └── auth.js       ← JWT verification middleware
@@ -60,7 +62,7 @@ npm run dev
 ```
 
 Server otomatis:
-- Membuat semua tabel di Neon Postgres (users, chats, messages, contacts, reactions)
+- Membuat semua tabel di Neon Postgres (users, chats, messages, contacts, reactions, chat_groups, chat_group_members, chat_group_messages, chat_group_reactions, chat_group_reads, rtc_signals)
 - Menyajikan frontend dari `public/`
 - Membuka WebSocket untuk real-time chat
 
@@ -101,7 +103,27 @@ http://localhost:3000
 | POST   | `/api/chats/:id/messages` | Kirim pesan |
 | DELETE | `/api/chats/:chatId/messages/:msgId` | Hapus pesan |
 | DELETE | `/api/chats/:id/messages` | Hapus semua riwayat |
-| PATCH  | `/api/chats/:chatId/messages/:msgId/reactions` | Tambah reaksi |
+| PATCH  | `/api/chats/:chatId/messages/:msgId/reactions` | Toggle reaksi |
+| GET    | `/api/chats/:id/rtc` | Ambil sinyal WebRTC (polling) |
+| GET    | `/api/chats/rtc/incoming` | Cek panggilan masuk (polling) |
+
+### Groups
+| Method | Path | Keterangan |
+|--------|------|-----------|
+| GET    | `/api/groups` | List grup saya (+ unread, last message) |
+| POST   | `/api/groups` | Buat grup (`name`, `description`, `member_ids`) |
+| GET    | `/api/groups/:id` | Detail grup + anggota |
+| PATCH  | `/api/groups/:id` | Ubah nama/deskripsi/foto (admin) |
+| DELETE | `/api/groups/:id` | Hapus grup (admin) |
+| POST   | `/api/groups/:id/members` | Tambah anggota (admin) |
+| DELETE | `/api/groups/:id/members/:userId` | Keluarkan anggota / keluar sendiri |
+| GET    | `/api/groups/:id/messages` | Ambil pesan grup (`limit`, `after`, `before`, `deleted_after`) |
+| POST   | `/api/groups/:id/messages` | Kirim pesan grup |
+| DELETE | `/api/groups/:id/messages/:msgId` | Hapus pesan (pengirim/admin) |
+| DELETE | `/api/groups/:id/messages` | Hapus riwayat grup (admin) |
+| PATCH  | `/api/groups/:id/messages/:msgId/reactions` | Toggle reaksi grup |
+| POST   | `/api/groups/:id/read` | Tandai grup sudah dibaca |
+| POST   | `/api/groups/:id/typing` | Fallback typing indicator (polling) |
 
 ### Upload
 | Method | Path | Keterangan |
@@ -121,15 +143,27 @@ http://localhost:3000
 | `message:new` | `{chatId, message}` | Broadcast pesan baru |
 | `message:deleted` | `{chatId, msgId}` | Broadcast hapus pesan |
 | `message:reacted` | `{chatId, msgId, userId, emoji}` | Broadcast reaksi |
+| `group:join` | `groupId` | Masuk room grup |
+| `group:leave` | `groupId` | Keluar room grup |
+| `group:typing:start` | `{groupId}` | Mulai mengetik di grup |
+| `group:typing:stop` | `{groupId}` | Berhenti mengetik di grup |
 
 ### Server → Client
 | Event | Data | Keterangan |
 |-------|------|-----------|
 | `message:new` | `{chatId, message}` | Ada pesan baru |
 | `message:deleted` | `{chatId, msgId}` | Pesan dihapus |
-| `message:reacted` | `{chatId, msgId, userId, emoji}` | Ada reaksi baru |
+| `message:reacted` | `{chatId, msgId, reactions}` | Reaksi berubah (peta lengkap) |
 | `typing:start` | `{chatId, userId, userName}` | Partner mengetik |
 | `typing:stop` | `{chatId, userId}` | Partner berhenti |
+| `group:message:new` | `{groupId, message}` | Ada pesan grup baru |
+| `group:message:deleted` | `{groupId, msgId}` | Pesan grup dihapus |
+| `group:message:reacted` | `{groupId, msgId, reactions}` | Reaksi grup berubah |
+| `group:typing:start` | `{groupId, userId, userName}` | Anggota grup mengetik |
+| `group:typing:stop` | `{groupId, userId}` | Anggota berhenti mengetik |
+| `group:updated` | `{groupId}` | Info/anggota grup berubah |
+| `group:deleted` | `{groupId}` | Grup dihapus |
+| `group:cleared` | `{groupId}` | Riwayat grup dibersihkan |
 | `user:online` | `{userId, online}` | Perubahan status online |
 | `chat:updated` | `{chatId}` | Update list chat |
 
@@ -141,11 +175,14 @@ http://localhost:3000
 - Preview foto/video sebelum kirim + caption
 - Bagikan lokasi GPS (OpenStreetMap, gratis)
 - Balas pesan (reply with quote)
-- Reaksi emoji pada pesan
-- Hapus pesan
+- Reaksi emoji pada pesan (toggle: klik emoji sama untuk hapus)
+- Hapus pesan (soft delete, sinkron ke semua klien)
+- Grup chat nyata (database): buat grup, kelola anggota, admin
+- Pesan grup + reaksi + unread + typing indicator grup
 - Typing indicator real-time
 - Status online/offline real-time
-- Unread message badge
+- Unread message badge (DM & grup)
+- WebRTC signaling persisten di database (aman untuk Vercel/multi-instance)
 - Edit profil + upload foto profil
 - Dark mode / Light mode
 - Notifikasi browser push
