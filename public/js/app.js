@@ -15,18 +15,25 @@ const API = window.__FLYCHAT_API__ || '';
 let currentUser    = null;
 let currentChatId  = null;
 let currentPartner = null;
+let currentGroupId = null;
+let currentGroup   = null;
 let replyingTo     = null;
 let contextMsgId   = null;
 let contextMsgData = null;
 let typingTimer    = null;
 let notifEnabled   = false;
 let allChats       = [];
+let allGroups      = [];
 
 // Polling intervals (menggantikan Socket.io)
 let pollMessages  = null;   // poll pesan baru setiap 2 detik
 let pollChats     = null;   // poll daftar chat setiap 5 detik
+let pollGroups    = null;   // poll daftar grup setiap 6 detik
 let lastMsgTime   = null;   // timestamp pesan terakhir untuk incremental poll
+let lastDeletedTime = null; // timestamp penghapusan terakhir
 let isTyping      = false;
+let lastTypingSent = 0;
+let typingHideTimer = null;
 
 /* ════════════════════════════════════════
    BOOT
@@ -60,7 +67,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
 function setupFormListeners() {
   /* ── Register ── */
-  el('register-form').addEventListener('submit', async e => {
+  const regForm = el('register-form');
+  if (regForm) regForm.addEventListener('submit', async e => {
     e.preventDefault();
     clearErr('register-error');
     const name = v('reg-name'), email = v('reg-email'),
@@ -83,7 +91,8 @@ function setupFormListeners() {
   });
 
   /* ── Login ── */
-  el('login-form').addEventListener('submit', async e => {
+  const loginForm = el('login-form');
+  if (loginForm) loginForm.addEventListener('submit', async e => {
     e.preventDefault();
     clearErr('login-error');
     setLoad('login-btn', true);
@@ -100,11 +109,12 @@ function setupFormListeners() {
 }
 
 function bootApp() {
-  initSocket();
-  startPolling();
-  loadSidebarProfile();
-  loadChats();
-  registerServiceWorker();
+  try { initSocket(); }   catch(e) { console.warn('initSocket error:', e); }
+  try { startPolling(); } catch(e) { console.warn('startPolling error:', e); }
+  try { loadSidebarProfile(); } catch(e) { console.warn('loadSidebarProfile error:', e); }
+  try { loadChats(); }    catch(e) { console.warn('loadChats error:', e); }
+  try { loadGroups(); }   catch(e) { console.warn('loadGroups error:', e); }
+  try { registerServiceWorker(); } catch(e) { console.warn('registerSW error:', e); }
   showScreen('home-screen');
   // Update nav avatar
   if (currentUser?.photo_url) {
@@ -133,9 +143,8 @@ function initSocket() {
 
     socket.on('connect', () => {
       console.log('🔌 Socket.io connected:', socket.id);
-      if (currentChatId) {
-        socket.emit('chat:join', currentChatId);
-      }
+      if (currentChatId) socket.emit('chat:join', currentChatId);
+      if (currentGroupId) socket.emit('group:join', currentGroupId);
     });
 
     socket.on('call:incoming', (data) => {
@@ -144,7 +153,7 @@ function initSocket() {
     });
 
     socket.on('call:signal', (data) => {
-      handleRtcSignalEvent(data);
+      Promise.resolve(handleRtcSignalEvent(data)).catch(() => {});
     });
 
     socket.on('call:rejected', (data) => {
@@ -161,17 +170,91 @@ function initSocket() {
       }
     });
 
+    /* ── DM messages ── */
     socket.on('message:new', ({ chatId, message }) => {
-      if (currentChatId === chatId) {
-        let sig;
-        try { sig = JSON.parse(message.content); } catch {}
-        if (sig?.__rtc__) {
-          processRtcSignal(message);
-          return;
-        }
+      let sig;
+      try { sig = JSON.parse(message.content); } catch {}
+      if (sig?.__rtc__) {
+        if (currentChatId === chatId) Promise.resolve(processRtcSignal(message)).catch(() => {});
+        return;
+      }
+      if (currentChatId === chatId && !currentGroupId) {
+        const already = message.id && document.querySelector(`[data-msg-id="${message.id}"]`);
         appendMessage(message, false);
+        bumpLastMsgTime(message.created_at);
+        if (!already && message.sender_id !== currentUser?.id) {
+          handleIncomingUnread(chatId);
+          if (document.visibilityState !== 'visible') sendPushNotif(message.content || `[${message.type}]`);
+        }
       }
       loadChats(true);
+    });
+
+    socket.on('message:deleted', ({ chatId, msgId }) => {
+      if (currentChatId === chatId && !currentGroupId) markMessageDeleted(msgId);
+    });
+
+    socket.on('message:reacted', ({ chatId, msgId, reactions }) => {
+      if (currentChatId === chatId && !currentGroupId) applyReactions(msgId, reactions);
+    });
+
+    socket.on('chat:cleared', ({ chatId }) => {
+      if (currentChatId === chatId && !currentGroupId) el('messages-list').innerHTML = '';
+      loadChats(true);
+    });
+
+    socket.on('typing:start', ({ chatId, userId: typingId, userName }) => {
+      if (currentChatId === chatId && !currentGroupId && typingId !== currentUser?.id)
+        showTypingIndicator(userName);
+    });
+
+    socket.on('typing:stop', ({ chatId, userId: typingId }) => {
+      if (currentChatId === chatId && !currentGroupId && typingId !== currentUser?.id)
+        clearTypingIndicator();
+    });
+
+    /* ── Group messages ── */
+    socket.on('group:message:new', ({ groupId, message }) => {
+      if (currentGroupId === groupId) {
+        const already = message.id && document.querySelector(`[data-msg-id="${message.id}"]`);
+        appendMessage(message, false);
+        bumpLastMsgTime(message.created_at);
+        if (!already && message.sender_id !== currentUser?.id) {
+          handleIncomingGroupUnread(groupId);
+          if (document.visibilityState !== 'visible') sendPushNotif(message.content || `[${message.type}]`);
+        }
+      }
+      loadGroups(true);
+    });
+
+    socket.on('group:message:deleted', ({ groupId, msgId }) => {
+      if (currentGroupId === groupId) markMessageDeleted(msgId);
+    });
+
+    socket.on('group:message:reacted', ({ groupId, msgId, reactions }) => {
+      if (currentGroupId === groupId) applyReactions(msgId, reactions);
+    });
+
+    socket.on('group:cleared', ({ groupId }) => {
+      if (currentGroupId === groupId) el('messages-list').innerHTML = '';
+      loadGroups(true);
+    });
+
+    socket.on('group:typing:start', ({ groupId, userId: typingId, userName }) => {
+      if (currentGroupId === groupId && typingId !== currentUser?.id)
+        showTypingIndicator(userName);
+    });
+
+    socket.on('group:typing:stop', ({ groupId, userId: typingId }) => {
+      if (currentGroupId === groupId && typingId !== currentUser?.id)
+        clearTypingIndicator();
+    });
+
+    socket.on('group:updated', () => loadGroups(true));
+
+    socket.on('group:deleted', ({ groupId }) => {
+      if (currentGroupId === groupId) resetGroupChat();
+      loadGroups(true);
     });
 
     socket.on('user:online', ({ userId, online }) => {
@@ -254,15 +337,17 @@ let pollIncomingCalls = null;
 
 function startPolling() {
   stopPolling();
-  pollChats = setInterval(() => loadChats(true), 5000);
+  pollChats  = setInterval(() => loadChats(true), 5000);
+  pollGroups = setInterval(() => loadGroups(true), 6000);
   pollIncomingCalls = setInterval(checkIncomingCallsHttp, 2500);
 }
 
 function stopPolling() {
   clearInterval(pollChats);
+  clearInterval(pollGroups);
   clearInterval(pollMessages);
   clearInterval(pollIncomingCalls);
-  pollChats = pollMessages = pollIncomingCalls = null;
+  pollChats = pollGroups = pollMessages = pollIncomingCalls = null;
 }
 
 async function checkIncomingCallsHttp() {
@@ -284,38 +369,124 @@ async function checkIncomingCallsHttp() {
   } catch {}
 }
 
-function startMessagePolling(chatId) {
-  clearInterval(pollMessages);
-  pollMessages = setInterval(async () => {
-    if (!chatId || chatId !== currentChatId) return;
-    try {
-      const qs   = lastMsgTime ? `?after=${encodeURIComponent(lastMsgTime)}` : '';
-      const data = await apiGet(`/api/chats/${chatId}/messages${qs}`);
-      (data.messages || []).forEach(async msg => {
-        if (!lastMsgTime || new Date(msg.created_at) > new Date(lastMsgTime))
-          lastMsgTime = msg.created_at;
-
-        if (msg.sender_id !== currentUser.id) {
-          // Cek apakah ini sinyal WebRTC — jika ya, proses tapi jangan tampilkan sebagai pesan
-          let sig;
-          try { sig = JSON.parse(msg.content); } catch {}
-          if (sig?.__rtc__) {
-            await processRtcSignal(msg);
-            return; // jangan render sebagai bubble chat
-          }
-          appendMessage(msg, false);
-          sendPushNotif(msg.content || `[${msg.type}]`);
-          incrementUnread(chatId);
-        }
-      });
-    } catch {}
-  }, 2000);
+/* ════════════════════════════════════════
+   ACTIVE CHAT POLLING (DM + Group)
+════════════════════════════════════════ */
+function bumpLastMsgTime(createdAt) {
+  if (!createdAt) return;
+  if (!lastMsgTime || new Date(createdAt) > new Date(lastMsgTime)) lastMsgTime = createdAt;
 }
-function stopMessagePolling() { clearInterval(pollMessages); pollMessages = null; }
+
+function buildPollQuery() {
+  const params = new URLSearchParams();
+  if (lastMsgTime)     params.set('after', lastMsgTime);
+  if (lastDeletedTime) params.set('deleted_after', lastDeletedTime);
+  const s = params.toString();
+  return s ? `?${s}` : '';
+}
+
+function startMessagePolling() {
+  clearInterval(pollMessages);
+  pollMessages = setInterval(pollActiveChat, 2000);
+}
+
+function stopMessagePolling() {
+  clearInterval(pollMessages);
+  pollMessages = null;
+}
+
+async function pollActiveChat() {
+  try {
+    if (currentGroupId) {
+      const data = await apiGet(`/api/groups/${currentGroupId}/messages${buildPollQuery()}`);
+      applyPollData(data, true);
+      return;
+    }
+    if (!currentChatId) return;
+    const data = await apiGet(`/api/chats/${currentChatId}/messages${buildPollQuery()}`);
+    applyPollData(data, false);
+  } catch {}
+}
+
+function applyPollData(data, isGroup) {
+  const list = el('messages-list');
+  if (!list) return;
+
+  (data.messages || []).forEach(msg => {
+    // Sinyal WebRTC jangan dirender sebagai bubble
+    let sig;
+    try { sig = JSON.parse(msg.content); } catch {}
+    if (!isGroup && sig?.__rtc__) {
+      bumpLastMsgTime(msg.created_at);
+      Promise.resolve(processRtcSignal(msg)).catch(() => {});
+      return;
+    }
+
+    bumpLastMsgTime(msg.created_at);
+
+    if (msg.is_deleted) { appendMessage(msg, false); return; }
+
+    const alreadyRendered = msg.id && document.querySelector(`[data-msg-id="${msg.id}"]`);
+    if (alreadyRendered) return;
+
+    appendMessage(msg, false);
+    if (msg.sender_id !== currentUser?.id) {
+      if (isGroup) handleIncomingGroupUnread(msg.group_id || currentGroupId);
+      else         handleIncomingUnread(msg.chat_id || currentChatId);
+      if (document.visibilityState !== 'visible') {
+        sendPushNotif(msg.content || `[${msg.type}]`);
+      }
+    }
+  });
+
+  (data.deleted || []).forEach(d => {
+    markMessageDeleted(d.id);
+    if (d.deleted_at && (!lastDeletedTime || new Date(d.deleted_at) > new Date(lastDeletedTime))) {
+      lastDeletedTime = d.deleted_at;
+    }
+  });
+
+  if (Array.isArray(data.reactions)) applyReactionRows(data.reactions);
+
+  updateTypingFromPoll(data.typing);
+}
+
+function applyReactionRows(rows) {
+  const byMsg = {};
+  rows.forEach(r => {
+    if (!byMsg[r.message_id]) byMsg[r.message_id] = {};
+    byMsg[r.message_id][r.user_id] = r.emoji;
+  });
+  // Sinkronkan semua pesan yang sedang tampil — termasuk yang reaksinya habis
+  document.querySelectorAll('#messages-list [data-msg-id]').forEach(w => {
+    const id = w.dataset.msgId;
+    applyReactions(id, byMsg[id] || {});
+  });
+}
+
+/* ════════════════════════════════════════
+   TYPING INDICATOR
+════════════════════════════════════════ */
+function showTypingIndicator(name) {
+  const area = el('typing-area');
+  if (!area) return;
+  area.innerHTML = `<div class="typing-indicator">
+    <span class="t-dot"></span><span class="t-dot"></span><span class="t-dot"></span>
+    <span class="typing-text" style="padding:0 0 0 6px">${esc(name || 'Seseorang')} sedang mengetik…</span>
+  </div>`;
+  clearTimeout(typingHideTimer);
+  typingHideTimer = setTimeout(clearTypingIndicator, 4500);
+}
+
+function clearTypingIndicator() {
+  clearTimeout(typingHideTimer);
+  const area = el('typing-area');
+  if (area) area.innerHTML = '';
+}
 
 function updateTypingFromPoll(typing) {
-  // typing indicator dari polling tidak diimplementasi untuk Vercel
-  // karena tidak ada shared state — abaikan saja
+  if (!Array.isArray(typing) || !typing.length) { clearTypingIndicator(); return; }
+  showTypingIndicator(typing[0].name);
 }
 
 /* ════════════════════════════════════════
@@ -323,7 +494,8 @@ function updateTypingFromPoll(typing) {
 ════════════════════════════════════════ */
 window.showScreen = function(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  el(id).classList.add('active');
+  const target = el(id);
+  if (target) target.classList.add('active');
   if (id === 'profile-screen') populateProfileForm();
 };
 
@@ -395,7 +567,10 @@ window.confirmLogout = function() {
   apiPost('/api/auth/logout').catch(() => {});
   stopPolling();
   localStorage.removeItem('fc_token');
-  currentUser = currentChatId = currentPartner = null;
+  currentUser = currentChatId = currentPartner = currentGroupId = currentGroup = null;
+  allChats = [];
+  allGroups = [];
+  lastMsgTime = lastDeletedTime = null;
   showScreen('login-screen');
 };
 
@@ -403,15 +578,24 @@ window.confirmLogout = function() {
    AUTH — FORGOT PASSWORD
 ════════════════════════════════════════ */
 window.forgotPassword = function() {
-  // Tampilkan modal forgot password
-  el('forgot-modal-email').value = el('login-email')?.value || '';
-  el('forgot-modal-error').classList.add('hidden');
-  el('forgot-modal-success').classList.add('hidden');
-  el('forgot-btn-submit').disabled = false;
-  el('forgot-btn-submit').querySelector('.btn-text').textContent = 'Kirim Link Reset';
-  el('forgot-btn-submit').querySelector('.spinner')?.classList.add('hidden');
-  el('forgot-password-modal').classList.remove('hidden');
-  el('forgot-modal-email').focus();
+  const modalEl  = el('forgot-password-modal');
+  const emailEl  = el('forgot-modal-email');
+  const errorEl  = el('forgot-modal-error');
+  const successEl = el('forgot-modal-success');
+  const submitBtn = el('forgot-btn-submit');
+  if (!modalEl) return;
+
+  if (emailEl)  emailEl.value = el('login-email')?.value || '';
+  if (errorEl)  errorEl.classList.add('hidden');
+  if (successEl) successEl.classList.add('hidden');
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    const btnText = submitBtn.querySelector('.btn-text');
+    if (btnText) btnText.textContent = 'Kirim Link Reset';
+    submitBtn.querySelector('.spinner')?.classList.add('hidden');
+  }
+  modalEl.classList.remove('hidden');
+  if (emailEl) emailEl.focus();
 };
 
 window.closeForgotModal = function() {
@@ -419,25 +603,27 @@ window.closeForgotModal = function() {
 };
 
 window.submitForgotPassword = async function() {
-  const email = el('forgot-modal-email').value.trim();
-  el('forgot-modal-error').classList.add('hidden');
-  el('forgot-modal-success').classList.add('hidden');
+  const emailEl   = el('forgot-modal-email');
+  const errorEl   = el('forgot-modal-error');
+  const successEl = el('forgot-modal-success');
+  const email     = emailEl?.value.trim() || '';
+
+  if (errorEl)   errorEl.classList.add('hidden');
+  if (successEl) successEl.classList.add('hidden');
 
   if (!email) {
-    el('forgot-modal-error').textContent = 'Masukkan alamat email kamu.';
-    el('forgot-modal-error').classList.remove('hidden');
+    if (errorEl) { errorEl.textContent = 'Masukkan alamat email kamu.'; errorEl.classList.remove('hidden'); }
     return;
   }
 
   setLoad('forgot-btn-submit', true);
   try {
     await apiPost('/api/auth/forgot-password', { email });
-    el('forgot-modal-success').classList.remove('hidden');
-    el('forgot-modal-success').textContent = '✅ Jika email terdaftar, link reset password telah dikirim. Cek inbox (dan folder spam) kamu.';
-    el('forgot-btn-submit').disabled = true;
+    if (successEl) { successEl.classList.remove('hidden'); successEl.textContent = '✅ Jika email terdaftar, link reset password telah dikirim. Cek inbox (dan folder spam) kamu.'; }
+    const submitBtn = el('forgot-btn-submit');
+    if (submitBtn) submitBtn.disabled = true;
   } catch (err) {
-    el('forgot-modal-error').textContent = err.message || 'Gagal mengirim email. Coba lagi.';
-    el('forgot-modal-error').classList.remove('hidden');
+    if (errorEl) { errorEl.textContent = err.message || 'Gagal mengirim email. Coba lagi.'; errorEl.classList.remove('hidden'); }
   } finally {
     setLoad('forgot-btn-submit', false);
   }
@@ -494,27 +680,37 @@ window.submitResetPassword = async function() {
 ════════════════════════════════════════ */
 function loadSidebarProfile() {
   if (!currentUser) return;
-  el('sidebar-name').textContent   = currentUser.name || 'User';
-  el('sidebar-status').textContent = currentUser.status || '';
-  if (currentUser.photo_url) el('sidebar-avatar').src = currentUser.photo_url;
-  el('my-online-dot').className = 'online-dot';
+  const nameEl   = el('sidebar-name');
+  const statusEl = el('sidebar-status');
+  const avatarEl = el('sidebar-avatar');
+  const dotEl    = el('my-online-dot');
+  if (nameEl)   nameEl.textContent   = currentUser.name || 'User';
+  if (statusEl) statusEl.textContent = currentUser.status || '';
+  if (avatarEl && currentUser.photo_url) avatarEl.src = currentUser.photo_url;
+  if (dotEl)    dotEl.className = 'online-dot';
+  // Update nav avatar juga
+  const navAv = el('nav-user-avatar');
+  if (navAv && currentUser.photo_url) navAv.src = currentUser.photo_url;
 }
 
 /* ════════════════════════════════════════
    CHAT LIST
 ════════════════════════════════════════ */
-async function loadChats() {
+async function loadChats(silent = false) {
   try {
     const data = await apiGet('/api/chats');
     allChats = data.chats || [];
     renderChatList(allChats);
+    const q = el('search-contacts')?.value;
+    if (q) handleUniversalSearch(q);
   } catch (err) {
-    console.error('loadChats error:', err);
+    if (!silent) console.error('loadChats error:', err);
   }
 }
 
 function renderChatList(chats) {
   const list = el('chat-list');
+  if (!list) return; // belum di home-screen
   list.innerHTML = '';
   if (!chats.length) {
     list.innerHTML = '<div class="empty-list-msg">Belum ada percakapan. Tambah kontak untuk memulai!</div>';
@@ -564,13 +760,50 @@ function refreshChatPreview(chatId, text, time) {
 function incrementUnread(chatId) {
   const item = document.querySelector(`.chat-item[data-chat-id="${chatId}"]`);
   if (!item) return;
+  const meta = item.querySelector('.chat-item-meta');
+  if (!meta) return;
   let badge = item.querySelector('.unread-badge');
   if (!badge) {
     badge = document.createElement('span');
     badge.className = 'unread-badge';
-    item.querySelector('.chat-item-meta').appendChild(badge);
+    meta.appendChild(badge);
   }
   badge.textContent = (parseInt(badge.textContent) || 0) + 1;
+}
+
+function handleIncomingUnread(chatId) {
+  if (!chatId) return;
+  if (currentChatId === chatId && !currentGroupId && document.visibilityState === 'visible') {
+    // Sedang membuka chat ini → langsung tandai terbaca
+    apiPatch(`/api/chats/${chatId}/read`).catch(() => {});
+    document.querySelector(`.chat-item[data-chat-id="${chatId}"] .unread-badge`)?.remove();
+    return;
+  }
+  incrementUnread(chatId);
+}
+
+function incrementGroupUnread(groupId) {
+  const item = document.querySelector(`.group-item[data-group-id="${groupId}"]`);
+  if (!item) return;
+  const meta = item.querySelector('.chat-item-meta');
+  if (!meta) return;
+  let badge = item.querySelector('.unread-badge');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'unread-badge';
+    meta.appendChild(badge);
+  }
+  badge.textContent = (parseInt(badge.textContent) || 0) + 1;
+}
+
+function handleIncomingGroupUnread(groupId) {
+  if (!groupId) return;
+  if (currentGroupId === groupId && document.visibilityState === 'visible') {
+    apiPost(`/api/groups/${groupId}/read`).catch(() => {});
+    document.querySelector(`.group-item[data-group-id="${groupId}"] .unread-badge`)?.remove();
+    return;
+  }
+  incrementGroupUnread(groupId);
 }
 
 /* ════════════════════════════════════════
@@ -630,7 +863,12 @@ async function openChat(chatId, partner) {
 
   currentChatId  = chatId;
   currentPartner = partner;
+  currentGroupId = null;
+  currentGroup   = null;
   replyingTo     = null;
+  lastMsgTime    = null;
+  lastDeletedTime = null;
+  clearTypingIndicator();
   el('reply-preview').classList.add('hidden');
   el('typing-area').innerHTML = '';
 
@@ -650,14 +888,22 @@ async function openChat(chatId, partner) {
   el('active-chat').classList.remove('hidden');
   el('chat-area').classList.add('active');
 
-  // Update header
-  el('chat-partner-name').textContent = partner.name || 'User';
-  el('chat-partner-avatar').src = partner.photo_url || 'assets/default-avatar.svg';
+  // Header DM: tampilkan status + tombol panggilan
+  const pNameEl   = el('chat-partner-name');
+  const pAvatarEl = el('chat-partner-avatar');
+  if (pNameEl)   pNameEl.textContent = partner.name || 'User';
+  if (pAvatarEl) pAvatarEl.src       = partner.photo_url || 'assets/default-avatar.svg';
+  const dotEl = el('partner-online-dot');
+  if (dotEl) dotEl.style.display = '';
+  const voiceBtn = el('voice-call-btn');
+  const videoBtn = el('video-call-btn');
+  if (voiceBtn) voiceBtn.style.display = '';
+  if (videoBtn) videoBtn.style.display = '';
   updatePartnerStatus(partner);
 
   // Load messages
   await loadMessages(chatId);
-  startMessagePolling(chatId);
+  startMessagePolling();
   if (socket && socket.connected) {
     socket.emit('chat:join', chatId);
   }
@@ -668,14 +914,12 @@ function updatePartnerStatus(p) {
   const statusEl = el('chat-partner-status');
   const dotEl    = el('partner-online-dot');
   if (online) {
-    statusEl.textContent = 'Online';
-    statusEl.className   = 'status-text online';
-    dotEl.className      = 'online-dot';
+    if (statusEl) { statusEl.textContent = 'Online'; statusEl.className = 'status-text online'; }
+    if (dotEl)    dotEl.className = 'online-dot';
   } else {
     const ls = p.last_seen ? fmtTimeRelative(new Date(p.last_seen)) : '';
-    statusEl.textContent = ls ? `Terakhir ${ls}` : 'Offline';
-    statusEl.className   = 'status-text';
-    dotEl.className      = 'online-dot offline';
+    if (statusEl) { statusEl.textContent = ls ? `Terakhir ${ls}` : 'Offline'; statusEl.className = 'status-text'; }
+    if (dotEl)    dotEl.className = 'online-dot offline';
   }
 }
 
@@ -695,32 +939,41 @@ async function startChatWith(partner) {
 async function loadMessages(chatId) {
   const list = el('messages-list');
   list.innerHTML = '';
+  const isGroup = !!currentGroupId;
   try {
-    const data = await apiGet(`/api/chats/${chatId}/messages?limit=100`);
+    const url = isGroup
+      ? `/api/groups/${currentGroupId}/messages?limit=100`
+      : `/api/chats/${chatId}/messages?limit=100`;
+    const data = await apiGet(url);
     const msgs = data.messages || [];
-    let lastDate = null;
     msgs.forEach(msg => {
       // Jangan tampilkan sinyal WebRTC sebagai chat bubble
       let sig; try { sig = JSON.parse(msg.content); } catch {}
-      if (sig?.__rtc__) return;
+      if (!isGroup && sig?.__rtc__) return;
 
-      const d = msg.created_at ? new Date(msg.created_at) : null;
-      if (d) {
-        const ds = fmtDate(d);
-        if (ds !== lastDate) {
-          const sep = document.createElement('div');
-          sep.className = 'date-separator';
-          sep.innerHTML = `<span>${ds}</span>`;
-          list.appendChild(sep);
-          lastDate = ds;
-        }
-      }
+      if (msg.created_at) ensureDateSeparator(new Date(msg.created_at));
       list.appendChild(buildMsgBubble(msg));
     });
+    lastMsgTime     = msgs.length ? msgs[msgs.length - 1].created_at : null;
+    lastDeletedTime = null;
+    clearTypingIndicator();
     scrollBottom(true);
   } catch (err) {
     list.innerHTML = '<div class="empty-list-msg">Gagal memuat pesan</div>';
   }
+}
+
+function ensureDateSeparator(date) {
+  const list = el('messages-list');
+  if (!list || !date) return;
+  const label = fmtDate(date);
+  const seps  = list.querySelectorAll('.date-separator span');
+  const last  = seps.length ? seps[seps.length - 1].textContent : null;
+  if (last === label) return;
+  const sep = document.createElement('div');
+  sep.className = 'date-separator';
+  sep.innerHTML = `<span>${label}</span>`;
+  list.appendChild(sep);
 }
 
 function appendMessage(msg, forceScroll = false) {
@@ -730,25 +983,35 @@ function appendMessage(msg, forceScroll = false) {
   // Cek apakah pesan sudah pernah dirender di UI
   if (msg?.id && document.querySelector(`[data-msg-id="${msg.id}"]`)) return;
 
+  if (msg?.created_at) ensureDateSeparator(new Date(msg.created_at));
   list.appendChild(buildMsgBubble(msg));
   scrollBottom(forceScroll);
 }
 
 function buildMsgBubble(msg) {
-  const isOut = msg.sender_id === currentUser.id;
+  const isOut  = msg.sender_id === currentUser?.id;
+  const isGroup = !!currentGroupId;
   const wrapper = document.createElement('div');
   wrapper.className = `msg-wrapper ${isOut ? 'outgoing' : 'incoming'}`;
   wrapper.dataset.msgId = msg.id;
 
   if (!isOut) {
     const av = document.createElement('img');
-    av.src = currentPartner?.photo_url || 'assets/default-avatar.svg';
+    av.src = msg.sender_photo || currentPartner?.photo_url || 'assets/default-avatar.svg';
     av.className = 'avatar-sm';
     wrapper.appendChild(av);
   }
 
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
+
+  // Nama pengirim (hanya untuk pesan masuk di grup)
+  if (isGroup && !isOut) {
+    const senderEl = document.createElement('div');
+    senderEl.className = 'msg-sender-name';
+    senderEl.textContent = msg.sender_name || 'Anggota';
+    bubble.appendChild(senderEl);
+  }
 
   // Reply quote
   if (msg.reply_to_id && msg.reply_to_text) {
@@ -809,24 +1072,23 @@ function buildReactionPills(msgId, reactions) {
   return rDiv;
 }
 
-function refreshMessageReaction(msgId, userId, emoji) {
+function applyReactions(msgId, reactions) {
   const wrapper = document.querySelector(`[data-msg-id="${msgId}"]`);
   if (!wrapper) return;
   const bubble = wrapper.querySelector('.msg-bubble');
-  let rDiv = document.getElementById(`reactions-${msgId}`);
+  if (!bubble) return;
 
-  // Rebuild reactions from existing pills + new
-  const counts = {};
-  rDiv?.querySelectorAll('.reaction-pill').forEach(p => {
-    const [e, c] = p.textContent.trim().split(' ');
-    counts[e] = parseInt(c) || 1;
-  });
-  counts[emoji] = (counts[emoji] || 0) + 1;
+  bubble.querySelector('.msg-reactions')?.remove();
+  if (reactions && Object.keys(reactions).length) {
+    bubble.appendChild(buildReactionPills(msgId, reactions));
+  }
+}
 
-  if (rDiv) rDiv.remove();
-  const newReactions = {};
-  Object.entries(counts).forEach(([e, c]) => { for (let i=0;i<c;i++) newReactions[`${userId}_${i}`] = e; });
-  bubble.appendChild(buildReactionPills(msgId, newReactions));
+function markMessageDeleted(msgId) {
+  const wrapper = document.querySelector(`[data-msg-id="${msgId}"]`);
+  if (!wrapper) return;
+  const bubble = wrapper.querySelector('.msg-bubble');
+  if (bubble) bubble.innerHTML = '<em class="msg-deleted">Pesan telah dihapus</em>';
 }
 
 function buildMsgContent(msg) {
@@ -875,10 +1137,31 @@ function buildMsgContent(msg) {
 /* ════════════════════════════════════════
    SEND MESSAGE
 ════════════════════════════════════════ */
+/* Kirim pesan ke DM atau grup sesuai konteks aktif */
+function currentChatTarget() {
+  if (currentGroupId) return { groupId: currentGroupId };
+  if (currentChatId)  return { chatId: currentChatId };
+  return null;
+}
+
+async function postChatMessage(payload, previewText, target = currentChatTarget()) {
+  if (!target) throw new Error('Pilih percakapan dulu');
+  if (target.groupId) {
+    const data = await apiPost(`/api/groups/${target.groupId}/messages`, payload);
+    appendMessage(data.message, true);
+    loadGroups(true);
+    return data.message;
+  }
+  const data = await apiPost(`/api/chats/${target.chatId}/messages`, payload);
+  appendMessage(data.message, true);
+  refreshChatPreview(target.chatId, previewText ?? payload.content ?? '', data.message.created_at);
+  return data.message;
+}
+
 window.sendMessage = async function() {
   const input = el('message-input');
   const text  = input.value.trim();
-  if (!currentChatId || !text) return;
+  if ((!currentChatId && !currentGroupId) || !text) return;
 
   input.value = '';
   const payload = { type: 'text', content: text };
@@ -890,13 +1173,7 @@ window.sendMessage = async function() {
   cancelReply();
 
   try {
-    const data = await apiPost(`/api/chats/${currentChatId}/messages`, payload);
-    appendMessage(data.message, true);
-    if (socket && socket.connected) {
-      socket.emit('message:new', { chatId: currentChatId, message: data.message });
-    }
-    refreshChatPreview(currentChatId, text, data.message.created_at);
-    sendPushNotif(text);
+    await postChatMessage(payload, text);
   } catch (err) {
     showToast('Gagal kirim pesan: ' + err.message, 'error');
   }
@@ -906,9 +1183,30 @@ window.sendMessage = async function() {
    TYPING
 ════════════════════════════════════════ */
 window.handleTyping = function() {
-  if (!currentChatId) return;
+  if (!currentChatId && !currentGroupId) return;
+
+  const isGroup = !!currentGroupId;
+  const id      = isGroup ? currentGroupId : currentChatId;
+  const now     = Date.now();
+
+  if (now - lastTypingSent > 1800) {
+    lastTypingSent = now;
+    apiPost(isGroup ? `/api/groups/${id}/typing` : `/api/chats/${id}/typing`, { typing: true }).catch(() => {});
+    if (socket?.connected) {
+      socket.emit(isGroup ? 'group:typing:start' : 'typing:start',
+        isGroup ? { groupId: id } : { chatId: id });
+    }
+  }
+
   clearTimeout(typingTimer);
-  typingTimer = setTimeout(() => {}, 2500);
+  typingTimer = setTimeout(() => {
+    lastTypingSent = 0;
+    apiPost(isGroup ? `/api/groups/${id}/typing` : `/api/chats/${id}/typing`, { typing: false }).catch(() => {});
+    if (socket?.connected) {
+      socket.emit(isGroup ? 'group:typing:stop' : 'typing:stop',
+        isGroup ? { groupId: id } : { chatId: id });
+    }
+  }, 2200);
 };
 
 /* ════════════════════════════════════════
@@ -929,12 +1227,14 @@ window.handleFileSelect = async function(input, type) {
   const file = input.files[0];
   input.value = '';
   if (!file) return;
-  if (!currentChatId) { showToast('Pilih percakapan dulu', 'error'); return; }
+  if (!currentChatId && !currentGroupId) { showToast('Pilih percakapan dulu', 'error'); return; }
   if (type === 'image' || type === 'video') showMediaPreview(file, type);
   else await uploadAndSend(file, type);
 };
 
 async function uploadAndSend(file, type, caption = '') {
+  const target = currentChatTarget();
+  if (!target) { showToast('Pilih percakapan dulu', 'error'); return; }
   const MAX = type === 'video' ? 100 : 50;
   if (file.size > MAX * 1024 * 1024) { showToast(`File terlalu besar (maks ${MAX}MB)`, 'error'); return; }
 
@@ -974,12 +1274,7 @@ async function uploadAndSend(file, type, caption = '') {
     }
     cancelReply();
 
-    const data = await apiPost(`/api/chats/${currentChatId}/messages`, msgPayload);
-    appendMessage(data.message, true);
-    if (socket && socket.connected) {
-      socket.emit('message:new', { chatId: currentChatId, message: data.message });
-    }
-    refreshChatPreview(currentChatId, msgPayload.content, data.message.created_at);
+    await postChatMessage(msgPayload, msgPayload.content, target);
     hideToast(toastEl);
     showToast('File terkirim! ✓', 'success');
   } catch (err) {
@@ -1020,7 +1315,9 @@ function showMediaPreview(file, type) {
 ════════════════════════════════════════ */
 window.shareLocation = function() {
   el('attach-menu').classList.add('hidden');
+  if (!currentChatId && !currentGroupId) { showToast('Pilih percakapan dulu', 'error'); return; }
   if (!navigator.geolocation) { showToast('Geolokasi tidak didukung', 'error'); return; }
+  const target = currentChatTarget();
   const t = showPersistentToast('📍 Mendapatkan lokasi...');
   navigator.geolocation.getCurrentPosition(async pos => {
     const { latitude: lat, longitude: lng } = pos.coords;
@@ -1036,12 +1333,7 @@ window.shareLocation = function() {
     cancelReply();
 
     try {
-      const data = await apiPost(`/api/chats/${currentChatId}/messages`, payload);
-      appendMessage(data.message, true);
-      if (socket && socket.connected) {
-        socket.emit('message:new', { chatId: currentChatId, message: data.message });
-      }
-      refreshChatPreview(currentChatId, `📍 ${locationName}`, data.message.created_at);
+      await postChatMessage(payload, `📍 ${locationName}`, target);
       hideToast(t);
       showToast('Lokasi dibagikan!', 'success');
     } catch (err) {
@@ -1061,13 +1353,16 @@ window.replyToMsg = function() {
   const msg = contextMsgData;
   const senderName = msg.sender_id === currentUser.id
     ? (currentUser.name || 'Kamu')
-    : (currentPartner?.name || 'Pengguna');
+    : (msg.sender_name || currentPartner?.name || 'Pengguna');
   const text = msg.content || (msg.type !== 'text' ? `[${msg.type}]` : '');
   replyingTo = { id: msg.id, senderName, text };
-  el('reply-preview-name').textContent = senderName;
-  el('reply-preview-text').textContent = truncate(text, 80);
-  el('reply-preview').classList.remove('hidden');
-  el('message-input').focus();
+  const rpName = el('reply-preview-name');
+  const rpText = el('reply-preview-text');
+  const rpEl   = el('reply-preview');
+  if (rpName) rpName.textContent = senderName;
+  if (rpText) rpText.textContent = truncate(text, 80);
+  if (rpEl)   rpEl.classList.remove('hidden');
+  el('message-input')?.focus();
 };
 window.cancelReply = function() { replyingTo = null; el('reply-preview').classList.add('hidden'); };
 
@@ -1078,13 +1373,22 @@ window.copyMsg = function() {
 
 window.deleteMsg = async function() {
   closeContextMenu();
-  if (!contextMsgData || !currentChatId) return;
-  if (contextMsgData.sender_id !== currentUser.id) { showToast('Hanya bisa hapus pesan sendiri', 'error'); return; }
+  const msg = contextMsgData;
+  if (!msg) return;
+  const isGroup = !!currentGroupId;
+  if (!isGroup && !currentChatId) return;
+
+  const isOwn   = msg.sender_id === currentUser.id;
+  const isAdmin = isGroup && currentGroup?.my_role === 'admin';
+  if (!isOwn && !isAdmin) { showToast('Hanya bisa hapus pesan sendiri', 'error'); return; }
   if (!confirm('Hapus pesan ini?')) return;
+
   try {
-    await apiDelete(`/api/chats/${currentChatId}/messages/${contextMsgData.id}`);
-    const wrapper = document.querySelector(`[data-msg-id="${contextMsgData.id}"]`);
-    if (wrapper) wrapper.querySelector('.msg-bubble').innerHTML = '<em class="msg-deleted">Pesan telah dihapus</em>';
+    const url = isGroup
+      ? `/api/groups/${currentGroupId}/messages/${msg.id}`
+      : `/api/chats/${currentChatId}/messages/${msg.id}`;
+    await apiDelete(url);
+    markMessageDeleted(msg.id);
     showToast('Pesan dihapus');
   } catch (err) {
     showToast('Gagal hapus: ' + err.message, 'error');
@@ -1092,9 +1396,27 @@ window.deleteMsg = async function() {
 };
 
 async function addReaction(msgId, emoji) {
-  if (!currentChatId) return;
-  await apiPatch(`/api/chats/${currentChatId}/messages/${msgId}/reactions`, { emoji });
+  try {
+    let data;
+    if (currentGroupId) {
+      data = await apiPatch(`/api/groups/${currentGroupId}/messages/${msgId}/reactions`, { emoji });
+    } else if (currentChatId) {
+      data = await apiPatch(`/api/chats/${currentChatId}/messages/${msgId}/reactions`, { emoji });
+    } else {
+      return;
+    }
+    if (data?.reactions) applyReactions(msgId, data.reactions);
+  } catch (err) {
+    showToast('Gagal memberi reaksi: ' + err.message, 'error');
+  }
 }
+
+window.reactToMsg = async function(emoji) {
+  if (!contextMsgData) return;
+  const msgId = contextMsgData.id;
+  closeContextMenu();
+  await addReaction(msgId, emoji);
+};
 
 /* ════════════════════════════════════════
    CONTEXT MENU
@@ -1103,7 +1425,9 @@ function showContextMenu(e, msg, refEl) {
   contextMsgId = msg.id; contextMsgData = msg;
   const menu = el('msg-context-menu');
   menu.classList.remove('hidden');
-  el('ctx-delete').style.display = msg.sender_id === currentUser.id ? '' : 'none';
+  const canDelete = msg.sender_id === currentUser.id ||
+    (!!currentGroupId && currentGroup?.my_role === 'admin');
+  el('ctx-delete').style.display = canDelete ? '' : 'none';
   let x, y;
   if (e)        { x = e.clientX; y = e.clientY; }
   else if (refEl){ const r = refEl.getBoundingClientRect(); x = r.left + r.width/2; y = r.top; }
@@ -1121,6 +1445,16 @@ window.toggleChatMenu  = function() { el('chat-dropdown').classList.toggle('hidd
 
 window.clearChatHistory = async function() {
   el('chat-dropdown').classList.add('hidden');
+
+  if (currentGroupId) {
+    if (currentGroup?.my_role !== 'admin') { showToast('Hanya admin yang bisa menghapus riwayat grup', 'error'); return; }
+    if (!confirm('Hapus semua riwayat pesan grup ini?')) return;
+    await apiDelete(`/api/groups/${currentGroupId}/messages`);
+    el('messages-list').innerHTML = '';
+    showToast('Riwayat grup dihapus');
+    return;
+  }
+
   if (!currentChatId || !confirm('Hapus semua riwayat pesan?')) return;
   await apiDelete(`/api/chats/${currentChatId}/messages`);
   el('messages-list').innerHTML = '';
@@ -1129,6 +1463,7 @@ window.clearChatHistory = async function() {
 
 window.showPartnerProfile = async function() {
   el('chat-dropdown').classList.add('hidden');
+  if (currentGroupId) { await openGroupDetail(currentGroupId); return; }
   if (!currentPartner) return;
   try {
     const data = await apiGet(`/api/users/${currentPartner.id}`);
@@ -1197,14 +1532,16 @@ async function populateProfileForm() {
   try {
     const data = await apiGet('/api/auth/me');
     const u = data.user;
-    el('profile-name').value   = u.name || '';
-    el('profile-status').value = u.status || '';
-    el('profile-about').value  = u.about  || '';
-    el('profile-phone').value  = u.phone  || '';
-    el('profile-email').value  = u.email  || '';
-    if (u.photo_url) el('profile-avatar-img').src = u.photo_url;
-    el('status-count').textContent = `${(u.status||'').length}/100`;
-    el('toggle-online-status').checked = u.show_online !== false;
+    if (el('profile-name'))   el('profile-name').value   = u.name   || '';
+    if (el('profile-status')) el('profile-status').value = u.status || '';
+    if (el('profile-about'))  el('profile-about').value  = u.about  || '';
+    if (el('profile-phone'))  el('profile-phone').value  = u.phone  || '';
+    if (el('profile-email'))  el('profile-email').value  = u.email  || '';
+    if (u.photo_url && el('profile-avatar-img')) el('profile-avatar-img').src = u.photo_url;
+    const sc = el('status-count');
+    if (sc) sc.textContent = `${(u.status||'').length}/100`;
+    const tog = el('toggle-online-status');
+    if (tog) tog.checked = u.show_online !== false;
   } catch {}
 }
 
@@ -1219,8 +1556,10 @@ window.saveProfile = async function() {
       phone:  el('profile-phone').value.trim()
     });
     currentUser = { ...currentUser, ...normalizeUser(data.user) };
-    el('sidebar-name').textContent   = currentUser.name;
-    el('sidebar-status').textContent = data.user.status || '';
+    const snEl = el('sidebar-name');
+    const ssEl = el('sidebar-status');
+    if (snEl) snEl.textContent = currentUser.name;
+    if (ssEl) ssEl.textContent = data.user.status || '';
     showToast('Profil disimpan! ✓', 'success');
   } catch (err) {
     showToast('Gagal: ' + err.message, 'error');
@@ -1256,8 +1595,10 @@ window.uploadAvatar = async function(input) {
       xhr.send(formData);
     });
     await apiPatch('/api/users/me', { photo_url: result.photoURL });
-    el('profile-avatar-img').src = result.photoURL;
-    el('sidebar-avatar').src     = result.photoURL;
+    const paEl = el('profile-avatar-img');
+    const saEl = el('sidebar-avatar');
+    if (paEl) paEl.src = result.photoURL;
+    if (saEl) saEl.src = result.photoURL;
     currentUser.photo_url = result.photoURL;
     showToast('Foto profil diperbarui! ✓', 'success');
   } catch (err) {
@@ -1469,12 +1810,13 @@ window.toggleEmojiPicker = function() {
 window.toggleTheme = function() {
   const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
   document.documentElement.setAttribute('data-theme', isDark ? 'light' : 'dark');
-  el('theme-btn').textContent = isDark ? '🌙' : '☀️';
+  const btn = el('theme-btn');
+  if (btn) btn.textContent = isDark ? '🌙' : '☀️';
   localStorage.setItem('fc-theme', isDark ? 'light' : 'dark');
 };
 function loadTheme() {
   const t = localStorage.getItem('fc-theme');
-  if (t) { document.documentElement.setAttribute('data-theme', t); }
+  if (t) document.documentElement.setAttribute('data-theme', t);
   const btn = el('theme-btn');
   if (btn) btn.textContent = (t === 'dark') ? '☀️' : '🌙';
 }
@@ -1496,7 +1838,10 @@ window.toggleNotifications = async function(checked) {
 
 function sendPushNotif(text) {
   if (!notifEnabled || document.visibilityState === 'visible') return;
-  new Notification(`FLYchat — ${currentPartner?.name || 'Pesan baru'}`, {
+  const title = currentGroup
+    ? `FLYchat — ${currentGroup.name}`
+    : `FLYchat — ${currentPartner?.name || 'Pesan baru'}`;
+  new Notification(title, {
     body: text.substring(0,100), icon: 'assets/icon.svg'
   });
 }
@@ -1522,6 +1867,7 @@ const RTC = {
   chatId:             null,
   pollTimer:          null,
   callId:             null,
+  seenCallIds:        new Set(),
   pendingOffer:       null,
   iceCandidatesQueue: [],
   _callTimer:         null
@@ -1554,6 +1900,10 @@ window.startVoiceCall = async function() { await initiateCall('voice'); };
 window.startVideoCall = async function() { await initiateCall('video'); };
 
 async function initiateCall(type) {
+  if (currentGroupId) {
+    showToast('Panggilan grup belum didukung', 'info');
+    return;
+  }
   if (!currentPartner || !currentChatId) {
     showToast('Pilih kontak atau buka chat terlebih dahulu', 'error');
     return;
@@ -1712,6 +2062,12 @@ async function flushIceCandidateQueue() {
 
 function handleIncomingCallSignal(data) {
   if (RTC.pc || RTC.pendingOffer) return; // sedang ada panggilan
+  // Jangan dering ulang untuk tawaran yang sudah pernah diproses
+  if (data.callId && RTC.seenCallIds.has(data.callId)) return;
+  if (data.callId) {
+    if (RTC.seenCallIds.size > 100) RTC.seenCallIds.clear();
+    RTC.seenCallIds.add(data.callId);
+  }
   RTC.pendingOffer = data;
   RTC.callId       = data.callId;
   RTC.callType     = data.callType || 'voice';
@@ -1731,9 +2087,9 @@ function showIncomingCallUI(data) {
   const callerName  = data.caller?.name || currentPartner?.name || 'Seseorang';
   const callerPhoto = data.caller?.photo_url || currentPartner?.photo_url || 'assets/default-avatar.svg';
 
-  el('incoming-caller-name').textContent = callerName;
-  el('incoming-call-type').textContent   = data.callType === 'video' ? '📹 Video Call' : '📞 Voice Call';
-  el('incoming-caller-avatar').src       = callerPhoto;
+  el('incoming-caller-name') && (el('incoming-caller-name').textContent = callerName);
+  el('incoming-call-type')   && (el('incoming-call-type').textContent   = data.callType === 'video' ? '📹 Video Call' : '📞 Voice Call');
+  el('incoming-caller-avatar') && (el('incoming-caller-avatar').src     = callerPhoto);
 }
 
 window.acceptCall = async function() {
@@ -1794,6 +2150,7 @@ window.acceptCall = async function() {
 
 window.rejectCall = function() {
   stopRingtone();
+  if (RTC.callId) RTC.seenCallIds.add(RTC.callId);
   const sig = RTC.pendingOffer;
   const cid = sig?.chatId || RTC.chatId || currentChatId;
   const tid = sig?.caller?.id || sig?.senderId || RTC.partnerId;
@@ -1815,6 +2172,7 @@ window.rejectCall = function() {
 
 window.endCall = function(notify = true) {
   stopRingtone();
+  if (RTC.callId) RTC.seenCallIds.add(RTC.callId);
   clearInterval(RTC.pollTimer);
   clearInterval(RTC._callTimer);
   RTC.pollTimer = RTC._callTimer = null;
@@ -1897,6 +2255,7 @@ async function handleRtcSignalEvent(data) {
   if (sig.callId && RTC.callId && sig.callId !== RTC.callId) return false;
 
   if (sig.action === 'answer' && RTC.isInitiator && RTC.pc) {
+    if (RTC.pc.signalingState !== 'have-local-offer') return true; // sudah diproses
     await RTC.pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sig.sdp }));
     await flushIceCandidateQueue();
     return true;
@@ -2004,9 +2363,18 @@ document.addEventListener('visibilitychange', () => {
   if (!currentUser) return;
   apiPatch('/api/users/me/presence', { online: !document.hidden }).catch(() => {});
 });
-window.addEventListener('beforeunload', () => {
-  if (currentUser) navigator.sendBeacon(`${API}/api/users/me/presence`,
-    new Blob([JSON.stringify({ online: false })], { type: 'application/json' }));
+window.addEventListener('pagehide', () => {
+  if (!currentUser) return;
+  // keepalive fetch agar header Authorization tetap terkirim (sendBeacon tidak bisa set header)
+  fetch(`${API}/api/users/me/presence`, {
+    method: 'PATCH',
+    keepalive: true,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${getToken()}`
+    },
+    body: JSON.stringify({ online: false })
+  }).catch(() => {});
 });
 
 /* Close menus on outside click */
@@ -2091,13 +2459,21 @@ function clearErr(id) { el(id)?.classList.add('hidden'); }
 let _toastTimer = null;
 function showToast(msg, type = '', duration = 2800) {
   const t = el('toast');
+  if (!t) { console.warn('Toast:', msg); return null; }
   t.textContent = msg;
   t.className = `toast show ${type}`;
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => t.classList.remove('show'), duration);
   return t;
 }
-function showPersistentToast(msg) { const t = el('toast'); t.textContent = msg; t.className = 'toast show'; clearTimeout(_toastTimer); return t; }
+function showPersistentToast(msg) {
+  const t = el('toast');
+  if (!t) { console.warn('Toast:', msg); return null; }
+  t.textContent = msg;
+  t.className = 'toast show';
+  clearTimeout(_toastTimer);
+  return t;
+}
 function hideToast(t) { if (t) t.classList.remove('show'); }
 
 function fmtTime(date) {
@@ -2307,61 +2683,177 @@ window.endCall = function(notify = true) {
 };
 
 /* ════════════════════════════════════════
-   GRUP / KELOMPOK
-   Disimpan di localStorage sebagai MVP
-   (tanpa backend DB khusus grup)
+   GRUP / KELOMPOK — API + Database
+   Endpoint: /api/groups (server/routes/groups.js)
 ════════════════════════════════════════ */
-const GROUPS_KEY = 'fc_groups';
-
-function getGroups() {
-  try { return JSON.parse(localStorage.getItem(GROUPS_KEY) || '[]'); } catch { return []; }
+function groupInitials(name) {
+  return (name || 'G').trim().split(/\s+/).filter(Boolean)
+    .map(w => w[0]).join('').slice(0, 2).toUpperCase() || 'G';
 }
 
-function saveGroups(groups) {
-  try { localStorage.setItem(GROUPS_KEY, JSON.stringify(groups)); } catch {}
+/* ── Daftar grup ── */
+async function loadGroups(silent = false) {
+  if (!currentUser) return;
+  const list = el('groups-list');
+  try {
+    const data = await apiGet('/api/groups');
+    allGroups = data.groups || [];
+    renderGroupList(allGroups);
+  } catch (err) {
+    if (!silent && list) {
+      list.innerHTML = '<div class="empty-list-msg">Gagal memuat grup</div>';
+    }
+  }
 }
 
-function loadGroups() {
+function renderGroupList(groups) {
   const list = el('groups-list');
   if (!list) return;
-  const groups = getGroups();
+  const q = el('search-contacts')?.value?.toLowerCase().trim();
+  const items = q ? groups.filter(g => (g.name || '').toLowerCase().includes(q)) : groups;
 
-  if (!groups.length) {
-    list.innerHTML = `
-      <div class="empty-list-msg">
-        Belum ada grup. Klik <strong>+ Buat Grup</strong> untuk memulai.
-      </div>`;
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-list-msg">${q ? 'Grup tidak ditemukan' : 'Belum ada grup. Klik <strong>+ Buat Grup</strong> untuk memulai.'}</div>`;
     return;
   }
-
   list.innerHTML = '';
-  groups.forEach(group => {
-    const div = document.createElement('div');
-    div.className = 'chat-item group-item';
-    const memberCount = (group.members || []).length;
-    const initials = (group.name || 'G').slice(0, 2).toUpperCase();
-
-    div.innerHTML = `
-      <div class="avatar-container">
-        <div class="group-avatar-circle">${esc(initials)}</div>
-      </div>
-      <div class="chat-item-info">
-        <div class="chat-item-name">${esc(group.name)}</div>
-        <div class="chat-item-preview">${memberCount} anggota${group.desc ? ' · ' + esc(group.desc) : ''}</div>
-      </div>
-      <div class="chat-item-meta">
-        <button class="group-action-btn" onclick="openGroupDetail('${esc(group.id)}')" title="Detail grup">···</button>
-      </div>
-    `;
-    list.appendChild(div);
-  });
+  items.forEach(g => list.appendChild(buildGroupItem(g)));
 }
 
+function buildGroupItem(group) {
+  const div = document.createElement('div');
+  div.className = 'chat-item group-item' + (group.id === currentGroupId ? ' active' : '');
+  div.dataset.groupId = group.id;
+  div.title = group.name || 'Grup';
+
+  const av = document.createElement('div');
+  av.className = 'avatar-container';
+  if (group.photo_url) {
+    av.innerHTML = `<img src="${esc(group.photo_url)}" class="avatar-md" alt=""/>`;
+  } else {
+    av.innerHTML = `<div class="group-avatar-circle">${esc(groupInitials(group.name))}</div>`;
+  }
+  div.appendChild(av);
+
+  const info = document.createElement('div');
+  info.className = 'chat-item-info';
+  const preview = group.last_message
+    ? truncate(group.last_message, 42)
+    : `${group.member_count || (group.members || []).length} anggota`;
+  info.innerHTML = `
+    <div class="chat-item-name">${esc(group.name || 'Grup')}</div>
+    <div class="chat-item-preview">${esc(preview)}</div>`;
+  div.appendChild(info);
+
+  const meta = document.createElement('div');
+  meta.className = 'chat-item-meta';
+  const time = group.last_message_at ? fmtTimeRelative(new Date(group.last_message_at)) : '';
+  const timeEl = document.createElement('span');
+  timeEl.className = 'chat-item-time';
+  timeEl.textContent = time;
+  meta.appendChild(timeEl);
+
+  if (group.unread > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'unread-badge';
+    badge.textContent = group.unread;
+    meta.appendChild(badge);
+  }
+  div.appendChild(meta);
+
+  div.addEventListener('click', () => openGroupChat(group.id, group));
+  return div;
+}
+
+/* ── Buka chat grup ── */
+async function openGroupChat(groupId, groupData = null) {
+  stopMessagePolling();
+
+  currentChatId   = null;
+  currentPartner  = null;
+  currentGroupId  = groupId;
+  currentGroup    = groupData || allGroups.find(g => g.id === groupId) || { id: groupId, name: 'Grup' };
+  replyingTo      = null;
+  lastMsgTime     = null;
+  lastDeletedTime = null;
+
+  clearTypingIndicator();
+  el('reply-preview').classList.add('hidden');
+  el('typing-area').innerHTML = '';
+
+  // Tandai sudah dibaca
+  apiPost(`/api/groups/${groupId}/read`).catch(() => {});
+  document.querySelector(`.group-item[data-group-id="${groupId}"] .unread-badge`)?.remove();
+
+  // Highlight sidebar
+  document.querySelectorAll('.chat-item').forEach(i =>
+    i.classList.toggle('active', i.dataset.groupId === groupId)
+  );
+
+  // Tampilkan panel chat
+  el('empty-chat').classList.add('hidden');
+  el('active-chat').classList.remove('hidden');
+  el('chat-area').classList.add('active');
+
+  // Header grup: sembunyikan status online + tombol panggilan
+  const pNameEl   = el('chat-partner-name');
+  const pAvatarEl = el('chat-partner-avatar');
+  const statusEl  = el('chat-partner-status');
+  if (pNameEl)   pNameEl.textContent = currentGroup.name || 'Grup';
+  if (pAvatarEl) pAvatarEl.src = currentGroup.photo_url || 'assets/default-avatar.svg';
+  if (statusEl)  statusEl.textContent = `${currentGroup.member_count || (currentGroup.members || []).length || 0} anggota`;
+  const dotEl = el('partner-online-dot');
+  if (dotEl) dotEl.style.display = 'none';
+  const voiceBtn = el('voice-call-btn');
+  const videoBtn = el('video-call-btn');
+  if (voiceBtn) voiceBtn.style.display = 'none';
+  if (videoBtn) videoBtn.style.display = 'none';
+
+  await loadMessages(null);
+  startMessagePolling();
+
+  if (socket && socket.connected) socket.emit('group:join', groupId);
+  loadGroups(true);
+}
+window.openGroupChat = openGroupChat;
+
+/* ── Reset tampilan grup (mis. grup dihapus / dikeluarkan) ── */
+function resetGroupChat() {
+  if (!currentGroupId) return;
+  stopMessagePolling();
+  currentGroupId = null;
+  currentGroup   = null;
+  lastMsgTime    = null;
+  lastDeletedTime = null;
+
+  const list = el('messages-list');
+  if (list) list.innerHTML = '';
+  clearTypingIndicator();
+  el('reply-preview').classList.add('hidden');
+
+  el('empty-chat').classList.remove('hidden');
+  el('active-chat').classList.add('hidden');
+  el('chat-area').classList.remove('active');
+
+  const nameEl   = el('chat-partner-name');
+  const statusEl = el('chat-partner-status');
+  const dotEl    = el('partner-online-dot');
+  const voiceBtn = el('voice-call-btn');
+  const videoBtn = el('video-call-btn');
+  if (nameEl)   nameEl.textContent = '-';
+  if (statusEl) statusEl.textContent = 'offline';
+  if (dotEl)    dotEl.style.display = '';
+  if (voiceBtn) voiceBtn.style.display = '';
+  if (videoBtn) videoBtn.style.display = '';
+
+  document.querySelectorAll('.chat-item').forEach(i => i.classList.remove('active'));
+}
+
+/* ── Buat grup ── */
 window.openCreateGroupModal = function() {
   el('group-name-input').value = '';
   el('group-desc-input').value = '';
 
-  // Isi picker kontak
   const picker = el('group-contacts-picker');
   picker.innerHTML = '<div style="font-size:.82rem;color:var(--text-m);padding:4px">Memuat kontak...</div>';
 
@@ -2376,7 +2868,7 @@ window.openCreateGroupModal = function() {
       const label = document.createElement('label');
       label.className = 'group-member-pick';
       label.innerHTML = `
-        <input type="checkbox" value="${u.id}" data-name="${esc(u.name)}" />
+        <input type="checkbox" value="${esc(u.id)}" data-name="${esc(u.name)}" />
         <img src="${esc(u.photo_url || 'assets/default-avatar.svg')}" class="avatar-sm" alt="" />
         <span>${esc(u.name)}</span>
       `;
@@ -2390,74 +2882,206 @@ window.openCreateGroupModal = function() {
   el('group-name-input').focus();
 };
 
-window.submitCreateGroup = function() {
+window.submitCreateGroup = async function() {
   const name = el('group-name-input').value.trim();
   if (!name) { showToast('Nama grup wajib diisi', 'error'); return; }
 
   const checkedBoxes = el('group-contacts-picker').querySelectorAll('input[type=checkbox]:checked');
-  const members = Array.from(checkedBoxes).map(cb => ({
-    id:   cb.value,
-    name: cb.dataset.name
-  }));
+  const memberIds = Array.from(checkedBoxes).map(cb => cb.value);
+  if (memberIds.length < 1) { showToast('Pilih minimal 1 anggota', 'error'); return; }
 
-  if (members.length < 1) { showToast('Pilih minimal 1 anggota', 'error'); return; }
+  const btn = document.querySelector('#create-group-modal .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Membuat...'; }
 
-  // Tambahkan diri sendiri sebagai admin
-  const group = {
-    id:        `grp_${Date.now()}`,
-    name,
-    desc:      el('group-desc-input').value.trim(),
-    admin_id:  currentUser.id,
-    members:   [{ id: currentUser.id, name: currentUser.name, role: 'admin' }, ...members.map(m => ({ ...m, role: 'member' }))],
-    created_at: new Date().toISOString()
-  };
+  try {
+    const data = await apiPost('/api/groups', {
+      name,
+      description: el('group-desc-input').value.trim(),
+      member_ids: memberIds
+    });
 
-  const groups = getGroups();
-  groups.unshift(group);
-  saveGroups(groups);
+    closeModal('create-group-modal');
+    showToast(`Grup "${name}" berhasil dibuat! 🎉`, 'success');
+    await loadGroups(true);
 
-  closeModal('create-group-modal');
-  showToast(`Grup "${name}" berhasil dibuat! 🎉`, 'success');
-  loadGroups();
+    const groupsBtn = el('nav-item-groups');
+    if (groupsBtn) switchNavSection('groups', groupsBtn);
 
-  // Pindah ke tab grup
-  const groupsBtn = el('nav-item-groups');
-  if (groupsBtn) switchNavSection('groups', groupsBtn);
+    if (data?.group?.id) openGroupChat(data.group.id, data.group);
+  } catch (err) {
+    showToast('Gagal membuat grup: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Buat Grup Sekarang'; }
+  }
 };
 
-window.openGroupDetail = function(groupId) {
-  const groups = getGroups();
-  const group  = groups.find(g => g.id === groupId);
-  if (!group) return;
+/* ── Detail & pengelolaan grup ── */
+let groupDetailId = null;
 
-  const isAdmin = group.admin_id === currentUser?.id;
-  const memberList = (group.members || []).map(m => `
-    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-      <img src="assets/default-avatar.svg" class="avatar-sm" alt=""/>
-      <span style="flex:1;font-size:.9rem">${esc(m.name)}</span>
-      <span style="font-size:.75rem;color:var(--text-m);background:var(--bg-app);padding:2px 8px;border-radius:12px">${m.role === 'admin' ? '👑 Admin' : 'Anggota'}</span>
-    </div>`).join('');
+window.openGroupDetail = async function(groupId) {
+  let group = allGroups.find(g => g.id === groupId) || null;
+  try {
+    const data = await apiGet(`/api/groups/${groupId}`);
+    group = data.group;
+  } catch (err) {
+    if (!group) { showToast('Gagal memuat detail grup', 'error'); return; }
+  }
+
+  groupDetailId = group.id;
+  el('chat-dropdown').classList.add('hidden');
+  const isAdmin = group.my_role === 'admin';
+  const members = group.members || [];
+
+  const memberList = members.map(m => {
+    const isMe = m.id === currentUser?.id;
+    const canRemove = isAdmin && !isMe;
+    return `
+      <div class="group-member-row">
+        <img src="${esc(m.photo_url || 'assets/default-avatar.svg')}" class="avatar-sm" alt=""/>
+        <span class="group-member-name">${esc(m.name)}${isMe ? ' (Kamu)' : ''}</span>
+        <span class="group-role-badge">${m.role === 'admin' ? '👑 Admin' : 'Anggota'}</span>
+        ${canRemove ? `<button class="group-remove-btn" title="Keluarkan" onclick="removeGroupMember('${esc(m.id)}','${esc(m.name)}')">✕</button>` : ''}
+      </div>`;
+  }).join('');
+
+  let addSection = '';
+  if (isAdmin) {
+    addSection = `
+      <div class="group-add-section">
+        <div class="group-add-title">Tambah anggota</div>
+        <div id="group-add-picker" class="group-contacts-picker">
+          <div style="font-size:.8rem;color:var(--text-m);padding:4px">Memuat kontak...</div>
+        </div>
+        <button class="btn-primary" style="width:100%;padding:8px;margin-top:8px" onclick="addGroupMembers()">+ Tambahkan</button>
+      </div>`;
+  }
 
   const content = el('partner-profile-content');
   content.innerHTML = `
-    <div style="text-align:center;padding:8px 0 16px">
-      <div class="group-avatar-circle" style="width:72px;height:72px;font-size:1.6rem;margin:0 auto 10px">${esc((group.name||'G').slice(0,2).toUpperCase())}</div>
+    <div style="text-align:center;padding:4px 0 14px">
+      <div class="group-avatar-circle" style="width:72px;height:72px;font-size:1.6rem;margin:0 auto 10px">${esc(groupInitials(group.name))}</div>
       <div style="font-size:1.1rem;font-weight:700">${esc(group.name)}</div>
-      ${group.desc ? `<div style="font-size:.85rem;color:var(--text-m);margin-top:4px">${esc(group.desc)}</div>` : ''}
-      <div style="font-size:.8rem;color:var(--text-light);margin-top:4px">${(group.members||[]).length} anggota · Dibuat ${fmtDate(new Date(group.created_at))}</div>
+      ${group.description ? `<div style="font-size:.85rem;color:var(--text-m);margin-top:4px">${esc(group.description)}</div>` : ''}
+      <div style="font-size:.8rem;color:var(--text-light);margin-top:4px">${members.length || group.member_count || 0} anggota · Dibuat ${fmtDate(new Date(group.created_at))}</div>
+      ${isAdmin ? `<button class="group-edit-btn" onclick="renameGroup('${esc(group.id)}')">✏️ Ganti nama grup</button>` : ''}
     </div>
-    <div style="text-align:left;max-height:200px;overflow-y:auto">${memberList}</div>
-    ${isAdmin ? `<button class="btn-danger" style="width:100%;margin-top:12px;padding:9px" onclick="deleteGroup('${esc(groupId)}')">🗑 Hapus Grup</button>` : ''}
+    <div class="group-member-list">${memberList}</div>
+    ${addSection}
+    ${isAdmin
+      ? `<button class="btn-danger" style="width:100%;margin-top:12px;padding:9px" onclick="deleteGroup('${esc(group.id)}')">🗑 Hapus Grup</button>`
+      : `<button class="btn-danger" style="width:100%;margin-top:12px;padding:9px" onclick="leaveGroup('${esc(group.id)}')">🚪 Keluar dari Grup</button>`}
     <button class="btn-primary" style="width:auto;padding:9px 24px;margin-top:8px" onclick="closeModal('partner-profile-modal')">Tutup</button>
   `;
   el('partner-profile-modal').classList.remove('hidden');
+
+  // Isi picker kontak yang belum jadi anggota
+  if (isAdmin) {
+    const picker = el('group-add-picker');
+    apiGet('/api/users/me/contacts').then(data => {
+      const allContacts = data.contacts || [];
+      if (!picker) return;
+      if (!allContacts.length) {
+        picker.innerHTML = '<div style="font-size:.8rem;color:var(--text-m);padding:4px">Belum ada kontak. Tambah kontak dulu untuk mengundang anggota.</div>';
+        return;
+      }
+      const memberIds = new Set(members.map(m => m.id));
+      const contacts = allContacts.filter(c => !memberIds.has(c.id));
+      if (!contacts.length) {
+        picker.innerHTML = '<div style="font-size:.8rem;color:var(--text-m);padding:4px">Semua kontak sudah menjadi anggota.</div>';
+        return;
+      }
+      picker.innerHTML = '';
+      contacts.forEach(u => {
+        const label = document.createElement('label');
+        label.className = 'group-member-pick';
+        label.innerHTML = `
+          <input type="checkbox" value="${esc(u.id)}" />
+          <img src="${esc(u.photo_url || 'assets/default-avatar.svg')}" class="avatar-sm" alt="" />
+          <span>${esc(u.name)}</span>
+        `;
+        picker.appendChild(label);
+      });
+    }).catch(() => {
+      if (picker) picker.innerHTML = '<div style="font-size:.8rem;color:var(--text-m);padding:4px">Gagal memuat kontak</div>';
+    });
+  }
 };
 
-window.deleteGroup = function(groupId) {
-  if (!confirm('Hapus grup ini?')) return;
-  const groups = getGroups().filter(g => g.id !== groupId);
-  saveGroups(groups);
-  closeModal('partner-profile-modal');
-  loadGroups();
-  showToast('Grup dihapus');
+window.addGroupMembers = async function() {
+  const gid = groupDetailId || currentGroupId;
+  if (!gid) return;
+  const picker = el('group-add-picker');
+  if (!picker) return;
+  const ids = Array.from(picker.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
+  if (!ids.length) { showToast('Pilih minimal 1 kontak', 'error'); return; }
+
+  try {
+    await apiPost(`/api/groups/${gid}/members`, { user_ids: ids });
+    showToast('Anggota ditambahkan', 'success');
+    await loadGroups(true);
+    await openGroupDetail(gid);
+  } catch (err) {
+    showToast('Gagal menambah anggota: ' + err.message, 'error');
+  }
+};
+
+window.removeGroupMember = async function(userId, name) {
+  const gid = groupDetailId || currentGroupId;
+  if (!gid) return;
+  if (!confirm(`Keluarkan ${name} dari grup?`)) return;
+  try {
+    await apiDelete(`/api/groups/${gid}/members/${userId}`);
+    showToast(`${name} dikeluarkan`, 'success');
+    await loadGroups(true);
+    await openGroupDetail(gid);
+  } catch (err) {
+    showToast('Gagal mengeluarkan anggota: ' + err.message, 'error');
+  }
+};
+
+window.renameGroup = async function(groupId) {
+  const current = allGroups.find(g => g.id === groupId);
+  const name = prompt('Nama grup baru:', current?.name || '');
+  if (!name || !name.trim()) return;
+  try {
+    await apiPatch(`/api/groups/${groupId}`, { name: name.trim() });
+    showToast('Nama grup diperbarui', 'success');
+    await loadGroups(true);
+    if (currentGroupId === groupId) {
+      currentGroup.name = name.trim();
+      const nameEl = el('chat-partner-name');
+      if (nameEl) nameEl.textContent = name.trim();
+    }
+    await openGroupDetail(groupId);
+  } catch (err) {
+    showToast('Gagal mengubah nama: ' + err.message, 'error');
+  }
+};
+
+window.leaveGroup = async function(groupId) {
+  if (!confirm('Keluar dari grup ini?')) return;
+  try {
+    await apiDelete(`/api/groups/${groupId}/members/${currentUser.id}`);
+    closeModal('partner-profile-modal');
+    groupDetailId = null;
+    if (currentGroupId === groupId) resetGroupChat();
+    showToast('Kamu keluar dari grup');
+    await loadGroups(true);
+  } catch (err) {
+    showToast('Gagal keluar grup: ' + err.message, 'error');
+  }
+};
+
+window.deleteGroup = async function(groupId) {
+  if (!confirm('Hapus grup ini untuk semua anggota?')) return;
+  try {
+    await apiDelete(`/api/groups/${groupId}`);
+    closeModal('partner-profile-modal');
+    groupDetailId = null;
+    if (currentGroupId === groupId) resetGroupChat();
+    showToast('Grup dihapus');
+    await loadGroups(true);
+  } catch (err) {
+    showToast('Gagal menghapus grup: ' + err.message, 'error');
+  }
 };

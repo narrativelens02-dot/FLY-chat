@@ -271,10 +271,10 @@
             <span id="chat-partner-status" class="status-text">offline</span>
           </div>
           <div class="chat-header-actions">
-            <button class="icon-btn" onclick="startVoiceCall()" title="Panggilan Suara" aria-label="Panggilan suara">
+            <button class="icon-btn" id="voice-call-btn" onclick="startVoiceCall()" title="Panggilan Suara" aria-label="Panggilan suara">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12 19.79 19.79 0 0 1 1.61 3.44a2 2 0 0 1 1.99-2.18h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.09a16 16 0 0 0 6 6l.94-.94a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7a2 2 0 0 1 1.72 2.01z"/></svg>
             </button>
-            <button class="icon-btn" onclick="startVideoCall()" title="Video Call" aria-label="Video call">
+            <button class="icon-btn" id="video-call-btn" onclick="startVideoCall()" title="Video Call" aria-label="Video call">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
             </button>
             <button class="icon-btn" onclick="toggleChatMenu()" title="Lebih banyak" aria-label="Menu chat" id="chat-menu-btn">
@@ -419,6 +419,14 @@
 
   <!-- Message Context Menu -->
   <div id="msg-context-menu" class="context-menu hidden" role="menu">
+    <div class="ctx-reactions" role="group" aria-label="Reaksi cepat">
+      <button class="ctx-reaction" onclick="reactToMsg('👍')" title="Suka">👍</button>
+      <button class="ctx-reaction" onclick="reactToMsg('❤️')" title="Suka">❤️</button>
+      <button class="ctx-reaction" onclick="reactToMsg('😂')" title="Lucu">😂</button>
+      <button class="ctx-reaction" onclick="reactToMsg('😮')" title="Kaget">😮</button>
+      <button class="ctx-reaction" onclick="reactToMsg('😢')" title="Sedih">😢</button>
+      <button class="ctx-reaction" onclick="reactToMsg('🙏')" title="Terima kasih">🙏</button>
+    </div>
     <button class="context-item" id="ctx-reply" onclick="replyToMsg()" role="menuitem">↩ Balas</button>
     <button class="context-item" id="ctx-copy"  onclick="copyMsg()"    role="menuitem">📋 Salin</button>
     <button class="context-item" id="ctx-delete" onclick="deleteMsg()" role="menuitem" style="color:#dc2626">🗑 Hapus</button>

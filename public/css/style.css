@@ -1343,7 +1343,7 @@ body {
 .reaction-pill,
 .msg-reactions,
 .msg-bubble {
-  font-family: 'Noto Color Emoji', 'Inter', -apple-system, sans-serif;
+  font-family: 'Inter', 'Noto Color Emoji', -apple-system, sans-serif;
 }
 
 /* Emoji picker */
@@ -2519,3 +2519,125 @@ body {
   .bottom-taskbar { padding: 4px 2px 10px; }
   .taskbar-item { min-width: 42px; padding: 5px 6px; }
 }
+
+/* ════════════════════════════════════════
+   GRUP — tambahan UI
+════════════════════════════════════════ */
+/* Panel chat aktif harus mengisi tinggi .chat-area agar pesan bisa scroll */
+#active-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+.avatar-md {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.group-item.active { background: var(--primary-muted); }
+
+/* Nama pengirim di bubble grup */
+.msg-sender-name {
+  font-size: .74rem;
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: 3px;
+  line-height: 1.2;
+}
+
+/* Reaksi cepat di context menu */
+.ctx-reactions {
+  display: flex;
+  justify-content: space-between;
+  gap: 1px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.ctx-reaction {
+  border: none;
+  background: transparent;
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 5px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform .12s, background .12s;
+}
+.ctx-reaction:hover { background: var(--primary-muted); transform: scale(1.25); }
+
+/* Daftar anggota di modal detail grup */
+.group-member-list {
+  max-height: 220px;
+  overflow-y: auto;
+  text-align: left;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 0;
+}
+.group-member-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.group-member-row:last-child { border-bottom: none; }
+.group-member-name {
+  flex: 1;
+  min-width: 0;
+  font-size: .88rem;
+  color: var(--text-h);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-role-badge {
+  font-size: .7rem;
+  color: var(--text-m);
+  background: var(--bg-app);
+  padding: 2px 8px;
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+.group-remove-btn {
+  border: none;
+  background: transparent;
+  color: #dc2626;
+  cursor: pointer;
+  font-size: .85rem;
+  padding: 2px 6px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.group-remove-btn:hover { background: #fef2f2; }
+
+.group-add-section { text-align: left; margin-top: 12px; }
+.group-add-title {
+  font-size: .8rem;
+  font-weight: 700;
+  color: var(--text-b);
+  margin-bottom: 6px;
+}
+.group-add-section .group-contacts-picker {
+  max-height: 140px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+}
+.group-edit-btn {
+  margin-top: 10px;
+  font-size: .78rem;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-m);
+  cursor: pointer;
+  transition: background .15s;
+}
+.group-edit-btn:hover { background: var(--primary-muted); color: var(--primary); }
